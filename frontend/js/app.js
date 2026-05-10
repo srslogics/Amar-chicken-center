@@ -32,7 +32,7 @@ function updateAuthUi() {
   }
 
   if (authButton) {
-    authButton.textContent = currentUser ? "Logout" : "Login";
+    authButton.textContent = currentUser ? "Logout" : (authNeedsSetup ? "Create Owner" : "Login");
   }
 
   if (dailySheetMenu) {
@@ -75,7 +75,7 @@ async function bootAuth() {
   updateAuthUi();
 
   try {
-    const setup = await optionalApiCall("/auth/setup-status", { has_users: true }, "GET", null, { cache: false });
+    const setup = await optionalApiCall("/auth/setup-status", { has_users: false }, "GET", null, { cache: false });
     const token = localStorage.getItem("STOCKPILOT_AUTH_TOKEN");
 
     if (!setup.has_users) {
@@ -141,10 +141,10 @@ async function bootAuth() {
     authBootstrapped = true;
     loadPage("dashboard");
   } catch (e) {
-    authNeedsSetup = false;
+    authNeedsSetup = true;
     currentUser = null;
     updateAuthUi();
-    renderLoginScreen(false);
+    renderLoginScreen(true);
     authBootstrapped = true;
   }
 }
