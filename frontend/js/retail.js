@@ -106,6 +106,9 @@ function addRetailPaymentRow(entry = null, options = {}) {
   container.appendChild(row);
   row.querySelector(".retailPaymentSplitMode").value = entry?.mode || entry?.payment_mode || "Cash";
   row.querySelector(".retailPaymentSplitAmount").value = entry?.amount ?? "";
+  if (entry?.amount > 0) {
+    row.querySelector(".retailPaymentSplitAmount").dataset.autoFilled = "false";
+  }
 
   row.querySelectorAll("select,input").forEach(input => {
     input.addEventListener("input", () => handleRetailPaymentBreakdownChange());
@@ -190,9 +193,50 @@ function getRetailPaymentBreakdownState(mode = retailBillingMode) {
 }
 
 function handleRetailPaymentBreakdownChange() {
+  if (document.activeElement?.classList?.contains("retailPaymentSplitAmount")) {
+    document.activeElement.dataset.autoFilled = "false";
+  }
+  autoFillRetailSplitBalance();
   retailDraftDirty = true;
   retailBillCompleted = false;
   syncRetailSettlementUi();
+}
+
+function autoFillRetailSplitBalance(mode = retailBillingMode) {
+  const settlementType = retailField(mode, "settlementType")?.value || "paid";
+  if (settlementType !== "paid") return;
+
+  const rows = Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"));
+  if (rows.length !== 2) return;
+
+  const activeInput = document.activeElement?.classList?.contains("retailPaymentSplitAmount")
+    ? document.activeElement
+    : null;
+  if (!activeInput) return;
+
+  const currentRow = activeInput.closest(".retail-payment-row");
+  const otherRow = rows.find(row => row !== currentRow);
+  const otherInput = otherRow?.querySelector(".retailPaymentSplitAmount");
+  if (!currentRow || !otherInput) return;
+
+  const totalAmount = getRetailEstimatedTotal(mode);
+  const currentAmount = Number(activeInput.value || 0);
+  const remainingAmount = Math.max(totalAmount - currentAmount, 0);
+  const otherWasAutoFilled = otherInput.dataset.autoFilled === "true";
+  const otherIsBlank = String(otherInput.value || "").trim() === "";
+
+  if (!otherIsBlank && !otherWasAutoFilled) return;
+
+  if (!activeInput.value) {
+    if (otherWasAutoFilled) {
+      otherInput.value = "";
+      otherInput.dataset.autoFilled = "false";
+    }
+    return;
+  }
+
+  otherInput.value = remainingAmount > 0 ? remainingAmount.toFixed(2) : "";
+  otherInput.dataset.autoFilled = remainingAmount > 0 ? "true" : "false";
 }
 
 function initRetailPage() {
@@ -1121,17 +1165,6 @@ function syncRetailSettlementUi(mode = retailBillingMode) {
     if (paymentSection) paymentSection.style.display = "";
     paidAmount.disabled = false;
     paidAmount.placeholder = "Paid amount (auto)";
-  }
-
-  if (settlementValue === "paid" && paymentRows) {
-    const firstRow = paymentRows.querySelector(".retail-payment-row");
-    const allAmounts = Array.from(paymentRows.querySelectorAll(".retailPaymentSplitAmount"));
-    const hasPositiveAmount = allAmounts.some(input => Number(input.value || 0) > 0);
-    if (firstRow && !hasPositiveAmount) {
-      const firstAmount = firstRow.querySelector(".retailPaymentSplitAmount");
-      const totalAmount = getRetailEstimatedTotal(mode);
-      firstAmount.value = totalAmount > 0 ? totalAmount.toFixed(2) : "";
-    }
   }
 
   const paymentState = getRetailPaymentBreakdownState(mode);
