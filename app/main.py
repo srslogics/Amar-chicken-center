@@ -4,6 +4,7 @@ from urllib.parse import quote
 from datetime import datetime, timedelta
 import hashlib
 import hmac
+import json
 import os
 import secrets
 
@@ -143,6 +144,7 @@ def ensure_database_schema():
             )
         """))
         conn.execute(text("ALTER TABLE retail_bills ADD COLUMN IF NOT EXISTS ice_amount NUMERIC"))
+        conn.execute(text("ALTER TABLE retail_bills ADD COLUMN IF NOT EXISTS payment_breakdown TEXT"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS retail_bill_items (
                 id UUID PRIMARY KEY,
@@ -909,6 +911,61 @@ def parse_decimal(value, default="0"):
         return Decimal(default)
 
 
+def normalize_payment_breakdown(raw_breakdown):
+    if not isinstance(raw_breakdown, list):
+        return []
+
+    normalized = []
+    for entry in raw_breakdown:
+        if not isinstance(entry, dict):
+            continue
+        mode = str(entry.get("mode") or entry.get("payment_mode") or "Cash").strip() or "Cash"
+        amount = parse_decimal(entry.get("amount"))
+        if amount <= 0:
+            continue
+        normalized.append({
+            "mode": mode,
+            "amount": amount
+        })
+    return normalized
+
+
+def serialize_payment_breakdown(raw_value):
+    if not raw_value:
+        return []
+
+    parsed = raw_value
+    if isinstance(raw_value, str):
+        try:
+            parsed = json.loads(raw_value)
+        except Exception:
+            return []
+
+    return [
+        {
+            "mode": str(entry.get("mode") or entry.get("payment_mode") or "Cash").strip() or "Cash",
+            "amount": float(parse_decimal(entry.get("amount")))
+        }
+        for entry in (parsed or [])
+        if isinstance(entry, dict) and parse_decimal(entry.get("amount")) > 0
+    ]
+
+
+def build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, fallback_mode="Cash"):
+    if payment_breakdown:
+        seen = []
+        for entry in payment_breakdown:
+            mode = str(entry.get("mode") or "Cash").strip() or "Cash"
+            if mode not in seen:
+                seen.append(mode)
+        if seen:
+            return " + ".join(seen)
+
+    if paid_amount <= 0 and outstanding_amount > 0:
+        return "Credit"
+    return str(fallback_mode or "Cash").strip() or "Cash"
+
+
 def serialize_dressed_stock_entry(entry):
     return {
         "id": str(entry.id),
@@ -926,6 +983,7 @@ def serialize_dressed_stock_entry(entry):
 def serialize_retail_bill(bill, items):
     created_at = bill.created_at or datetime.utcnow()
     bill_mode = "dressed" if any((item.line_type or "STANDARD").upper() == "DRESSED" for item in items) else "regular"
+    payment_breakdown = serialize_payment_breakdown(getattr(bill, "payment_breakdown", None))
 
     return {
         "id": str(bill.id),
@@ -938,6 +996,7 @@ def serialize_retail_bill(bill, items):
         "customer_address": bill.customer_address or "",
         "cashier_name": bill.cashier_name or "admin",
         "payment_mode": bill.payment_mode or "Cash",
+        "payment_breakdown": payment_breakdown,
         "total_nag": float(bill.total_quantity or 0),
         "total_quantity": float(bill.total_quantity or 0),
         "total_weight": float(bill.total_weight or 0),
@@ -3955,6 +4014,7 @@ def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_
     party_address = str(payload.get("party_address") or "").strip()
     cashier_name = str(payload.get("cashier_name") or "admin").strip()
     payment_mode = str(payload.get("payment_mode") or "Cash").strip()
+    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
     notes = str(payload.get("notes") or "").strip()
 
     party_id = get_or_create_party(db, party_name, "BOTH", {}, phone=party_phone, address=party_address)
@@ -4042,6 +4102,7 @@ def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Sess
     party_address = str(payload.get("party_address") or "").strip()
     cashier_name = str(payload.get("cashier_name") or "admin").strip()
     payment_mode = str(payload.get("payment_mode") or "Cash").strip()
+    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
     notes = str(payload.get("notes") or "").strip()
 
     party_id = get_or_create_party(db, party_name, "BOTH", {}, phone=party_phone, address=party_address)
@@ -4204,7 +4265,11 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
 
     total_amount += ice_amount
 
-    if raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
+    if payment_breakdown:
+        paid_amount = sum((entry["amount"] for entry in payment_breakdown), Decimal("0"))
+        if paid_amount > total_amount:
+            return {"error": "Split payment total cannot exceed bill total"}
+    elif raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
         paid_amount = total_amount
 
     if paid_amount < 0:
@@ -4217,8 +4282,10 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     if outstanding_amount > 0 and not customer_name:
         return {"error": "Customer name is required for credit retail bills"}
 
-    if outstanding_amount > 0 and payment_mode.strip().upper() == "CASH":
-        payment_mode = "Credit"
+    if not payment_breakdown and paid_amount > 0:
+        payment_breakdown = [{"mode": payment_mode or "Cash", "amount": paid_amount}]
+
+    payment_mode = build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, payment_mode)
 
     transaction_party_id = party_id if outstanding_amount > 0 else None
 
@@ -4232,6 +4299,10 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
         customer_address=customer_address or None,
         cashier_name=cashier_name or "admin",
         payment_mode=payment_mode,
+        payment_breakdown=json.dumps([
+            {"mode": entry["mode"], "amount": float(entry["amount"])}
+            for entry in payment_breakdown
+        ]) if payment_breakdown else None,
         total_quantity=total_quantity,
         total_weight=total_weight,
         ice_amount=ice_amount,
@@ -4288,20 +4359,22 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
         ))
 
     if paid_amount > 0 and outstanding_amount > 0:
-        db.add(models.Transaction(
-            date=target_date,
-            party_id=party_id,
-            type="PAYMENT",
-            category="RECEIVED",
-            item_type="Retail Bill Payment",
-            quantity=Decimal("0"),
-            weight=0,
-            rate=0,
-            amount=paid_amount,
-            payment_mode=payment_mode,
-            bill_number=bill_number,
-            source_ref=f"retail-payment:{bill.id}"
-        ))
+        payment_entries = payment_breakdown or [{"mode": payment_mode, "amount": paid_amount}]
+        for payment_index, payment_entry in enumerate(payment_entries, start=1):
+            db.add(models.Transaction(
+                date=target_date,
+                party_id=party_id,
+                type="PAYMENT",
+                category="RECEIVED",
+                item_type="Retail Bill Payment",
+                quantity=Decimal("0"),
+                weight=0,
+                rate=0,
+                amount=payment_entry["amount"],
+                payment_mode=payment_entry["mode"],
+                bill_number=bill_number,
+                source_ref=f"retail-payment:{bill.id}:{payment_index}"
+            ))
 
     recompute_dressed_stock_remaining(db, target_date)
     db.commit()
@@ -4426,7 +4499,11 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
 
     total_amount += ice_amount
 
-    if raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
+    if payment_breakdown:
+        paid_amount = sum((entry["amount"] for entry in payment_breakdown), Decimal("0"))
+        if paid_amount > total_amount:
+            return {"error": "Split payment total cannot exceed bill total"}
+    elif raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
         paid_amount = total_amount
 
     if paid_amount < 0:
@@ -4439,8 +4516,10 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     if outstanding_amount > 0 and not customer_name:
         return {"error": "Customer name is required for credit retail bills"}
 
-    if outstanding_amount > 0 and payment_mode.strip().upper() == "CASH":
-        payment_mode = "Credit"
+    if not payment_breakdown and paid_amount > 0:
+        payment_breakdown = [{"mode": payment_mode or "Cash", "amount": paid_amount}]
+
+    payment_mode = build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, payment_mode)
 
     transaction_party_id = party_id if outstanding_amount > 0 else None
 
@@ -4454,6 +4533,10 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     bill.customer_address = customer_address or None
     bill.cashier_name = cashier_name or "admin"
     bill.payment_mode = payment_mode
+    bill.payment_breakdown = json.dumps([
+        {"mode": entry["mode"], "amount": float(entry["amount"])}
+        for entry in payment_breakdown
+    ]) if payment_breakdown else None
     bill.total_quantity = total_quantity
     bill.total_weight = total_weight
     bill.ice_amount = ice_amount
@@ -4469,7 +4552,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     db.query(models.Transaction).filter(
         or_(
             models.Transaction.source_ref.like(f"retail-bill:{bill.id}:%"),
-            models.Transaction.source_ref == f"retail-payment:{bill.id}"
+            models.Transaction.source_ref.like(f"retail-payment:{bill.id}%")
         )
     ).delete(synchronize_session=False)
 
@@ -4518,20 +4601,22 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
         ))
 
     if paid_amount > 0 and outstanding_amount > 0:
-        db.add(models.Transaction(
-            date=target_date,
-            party_id=party_id,
-            type="PAYMENT",
-            category="RECEIVED",
-            item_type="Retail Bill Payment",
-            quantity=Decimal("0"),
-            weight=0,
-            rate=0,
-            amount=paid_amount,
-            payment_mode=payment_mode,
-            bill_number=bill_number,
-            source_ref=f"retail-payment:{bill.id}"
-        ))
+        payment_entries = payment_breakdown or [{"mode": payment_mode, "amount": paid_amount}]
+        for payment_index, payment_entry in enumerate(payment_entries, start=1):
+            db.add(models.Transaction(
+                date=target_date,
+                party_id=party_id,
+                type="PAYMENT",
+                category="RECEIVED",
+                item_type="Retail Bill Payment",
+                quantity=Decimal("0"),
+                weight=0,
+                rate=0,
+                amount=payment_entry["amount"],
+                payment_mode=payment_entry["mode"],
+                bill_number=bill_number,
+                source_ref=f"retail-payment:{bill.id}:{payment_index}"
+            ))
 
     recompute_dressed_stock_remaining(db, previous_date)
     if previous_date != target_date:

@@ -810,12 +810,7 @@ function loadPage(page) {
                         <option value="credit">Credit</option>
                       </select>
                     </div>
-                    <select id="retailPaymentMode">
-                      <option value="Cash">Cash</option>
-                      <option value="Online">Online</option>
-                      <option value="Bank">Bank</option>
-                      <option value="Credit">Credit</option>
-                    </select>
+                    <input type="hidden" id="retailPaymentMode" value="Cash">
                     <div class="typeahead-field">
                       <input type="text" id="retailCustomerName" placeholder="Customer name (optional)" list="retailCustomerSuggestions" autocomplete="off" oninput="suggestRetailCustomers()" onfocus="suggestRetailCustomers()">
                       <div id="retailCustomerSuggestBox" class="typeahead-box"></div>
@@ -858,8 +853,19 @@ function loadPage(page) {
                   <div id="retailDressedRows" class="retail-items retail-items-horizontal"></div>
                 </div>
 
+                <div class="retail-shortcuts retail-billing-section" id="retailPaymentBreakdownSection">
+                  <div class="retail-shortcuts-head">
+                    <span>Payment Split</span>
+                    <p>Record how much was paid in each mode, such as cash plus online in one bill.</p>
+                  </div>
+                  <div id="retailPaymentBreakdownRows" class="retail-payment-rows"></div>
+                  <div class="retail-payment-actions">
+                    <button type="button" onclick="addRetailPaymentRow()">Add Payment Split</button>
+                  </div>
+                </div>
+
                 <div class="retail-form-grid retail-notes-grid">
-                  <input type="number" id="retailPaidAmount" placeholder="Paid amount" min="0" step="0.01">
+                  <input type="number" id="retailPaidAmount" placeholder="Paid amount (auto)" min="0" step="0.01" readonly>
                   <textarea id="retailNotes" placeholder="Notes for bill"></textarea>
                 </div>
                 <div class="retail-item-actions">

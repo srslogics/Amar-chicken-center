@@ -145,6 +145,7 @@ class RetailBill(Base):
     customer_address = Column(String)
     cashier_name = Column(String)
     payment_mode = Column(String)
+    payment_breakdown = Column(String)
     total_quantity = Column(Numeric)
     total_weight = Column(Numeric)
     ice_amount = Column(Numeric)

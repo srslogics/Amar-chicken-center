@@ -1227,6 +1227,32 @@ input[type="file"] {
   background: rgb(255 255 255 / 0.02);
 }
 
+.retail-payment-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.retail-payment-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.1fr) minmax(120px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(246 237 229 / 0.96));
+}
+
+.retail-payment-row button {
+  min-width: 0;
+  width: 100%;
+  padding-inline: 12px;
+}
+
+.retail-payment-actions {
+  margin-top: 12px;
+}
+
 .retail-setup-panel {
   margin-top: 18px;
 }
@@ -1717,6 +1743,7 @@ input[type="file"] {
   .retail-form-grid,
   .retail-item-row,
   .retail-shortcut-form,
+  .retail-payment-row,
   .dressed-stock-row,
   .retail-notes-grid {
     grid-template-columns: 1fr;

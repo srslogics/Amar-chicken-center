@@ -41,6 +41,7 @@ const retailPartyBalanceByMode = {
   dressed: 0
 };
 let retailSuggestHideTimer = null;
+const RETAIL_PAYMENT_MODES = ["Cash", "Online", "Bank", "Cheque"];
 
 const RETAIL_MODE_FIELDS = {
   regular: {
@@ -78,6 +79,120 @@ function retailFieldId(mode, field) {
 function retailField(mode, field) {
   const id = retailFieldId(mode, field);
   return id ? document.getElementById(id) : null;
+}
+
+function getRetailEstimatedTotal(mode = retailBillingMode) {
+  const items = collectRetailItemsFromForm(mode);
+  const itemsSubtotalAmount = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
+  const iceAmount = Number(retailField(mode, "iceAmount")?.value || 0);
+  return itemsSubtotalAmount + iceAmount;
+}
+
+function addRetailPaymentRow(entry = null, options = {}) {
+  const { skipDirty = false } = options;
+  const container = document.getElementById("retailPaymentBreakdownRows");
+  if (!container) return;
+
+  const row = document.createElement("div");
+  row.className = "retail-payment-row";
+  row.innerHTML = `
+    <select class="retailPaymentSplitMode" aria-label="Payment mode">
+      ${RETAIL_PAYMENT_MODES.map(mode => `<option value="${mode}">${mode}</option>`).join("")}
+    </select>
+    <input type="number" class="retailPaymentSplitAmount" placeholder="Amount" min="0" step="0.01">
+    <button type="button" onclick="removeRetailPaymentRow(this)">Remove</button>
+  `;
+
+  container.appendChild(row);
+  row.querySelector(".retailPaymentSplitMode").value = entry?.mode || entry?.payment_mode || "Cash";
+  row.querySelector(".retailPaymentSplitAmount").value = entry?.amount ?? "";
+
+  row.querySelectorAll("select,input").forEach(input => {
+    input.addEventListener("input", () => handleRetailPaymentBreakdownChange());
+    input.addEventListener("change", () => handleRetailPaymentBreakdownChange());
+  });
+
+  if (!skipDirty) {
+    retailDraftDirty = true;
+    retailBillCompleted = false;
+    syncRetailSettlementUi();
+  }
+}
+
+function removeRetailPaymentRow(button) {
+  const row = button.closest(".retail-payment-row");
+  const container = document.getElementById("retailPaymentBreakdownRows");
+  if (!row || !container) return;
+
+  if (container.children.length <= 1) {
+    row.querySelector(".retailPaymentSplitMode").value = "Cash";
+    row.querySelector(".retailPaymentSplitAmount").value = "";
+  } else {
+    row.remove();
+  }
+
+  retailDraftDirty = true;
+  retailBillCompleted = false;
+  syncRetailSettlementUi();
+}
+
+function collectRetailPaymentBreakdown() {
+  return Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"))
+    .map(row => ({
+      mode: row.querySelector(".retailPaymentSplitMode")?.value || "Cash",
+      amount: Number(row.querySelector(".retailPaymentSplitAmount")?.value || 0)
+    }))
+    .filter(entry => entry.amount > 0);
+}
+
+function getRetailPaymentBreakdownState(mode = retailBillingMode) {
+  const settlementType = retailField(mode, "settlementType")?.value || "paid";
+  const totalAmount = getRetailEstimatedTotal(mode);
+  const rows = Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"));
+  const positiveEntries = collectRetailPaymentBreakdown();
+
+  if (settlementType === "credit") {
+    return {
+      settlementType,
+      totalAmount,
+      paymentBreakdown: [],
+      paidAmount: 0,
+      outstandingAmount: totalAmount,
+      paymentMode: "Credit"
+    };
+  }
+
+  if (!positiveEntries.length && settlementType === "paid" && totalAmount > 0) {
+    const fallbackMode = rows[0]?.querySelector(".retailPaymentSplitMode")?.value || "Cash";
+    return {
+      settlementType,
+      totalAmount,
+      paymentBreakdown: [{ mode: fallbackMode, amount: totalAmount }],
+      paidAmount: totalAmount,
+      outstandingAmount: 0,
+      paymentMode: fallbackMode
+    };
+  }
+
+  const paidAmount = positiveEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+  const outstandingAmount = Math.max(totalAmount - paidAmount, 0);
+  const uniqueModes = [...new Set(positiveEntries.map(entry => entry.mode).filter(Boolean))];
+  const paymentMode = uniqueModes.length ? uniqueModes.join(" + ") : (settlementType === "credit" ? "Credit" : "Cash");
+
+  return {
+    settlementType,
+    totalAmount,
+    paymentBreakdown: positiveEntries,
+    paidAmount,
+    outstandingAmount,
+    paymentMode
+  };
+}
+
+function handleRetailPaymentBreakdownChange() {
+  retailDraftDirty = true;
+  retailBillCompleted = false;
+  syncRetailSettlementUi();
 }
 
 function initRetailPage() {
@@ -160,6 +275,7 @@ function initRetailPage() {
   renderRetailShortcuts();
   renderShortcutManagerList();
   renderRetailOfflineBanner();
+  addRetailPaymentRow(null, { skipDirty: true });
   syncRetailSettlementUi();
   setRetailBillingMode("regular");
   ensureRetailPartyDirectoryLoaded();
@@ -879,23 +995,12 @@ function buildRetailBillFromForm(mode = retailBillingMode) {
   const itemsSubtotalAmount = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const totalNag = items.reduce((sum, item) => sum + Number(item.nag || item.quantity || 0), 0);
   const totalWeight = items.reduce((sum, item) => sum + Number(item.weight || (item.unit === "KGS" ? item.nag || item.quantity : 0) || 0), 0);
-  const paymentMode = retailField(mode, "paymentMode")?.value || "Cash";
   const settlementType = retailField(mode, "settlementType")?.value || "paid";
   const customerName = retailField(mode, "customerName")?.value.trim() || "";
   const iceAmount = Number(retailField(mode, "iceAmount")?.value || 0);
-  const rawPaidAmount = retailField(mode, "paidAmount")?.value;
   const totalAmount = itemsSubtotalAmount + iceAmount;
-  let paidAmount = Math.min(
-    rawPaidAmount === "" && paymentMode !== "Credit" ? totalAmount : Number(rawPaidAmount || 0),
-    totalAmount
-  );
-
-  if (settlementType === "paid") {
-    paidAmount = totalAmount;
-  } else if (settlementType === "credit") {
-    paidAmount = 0;
-  }
-
+  const paymentState = getRetailPaymentBreakdownState(mode);
+  const paidAmount = Math.min(Number(paymentState.paidAmount || 0), totalAmount);
   const outstandingAmount = Math.max(totalAmount - paidAmount, 0);
   const priorPartyBalance = customerName ? getRetailPartyBalance(mode) : 0;
   const partyBalance = priorPartyBalance + outstandingAmount;
@@ -910,7 +1015,8 @@ function buildRetailBillFromForm(mode = retailBillingMode) {
     customer_phone: retailField(mode, "customerPhone")?.value.trim() || "",
     customer_address: retailField(mode, "customerAddress")?.value.trim() || "",
     settlement_type: settlementType,
-    payment_mode: paymentMode,
+    payment_mode: paymentState.paymentMode,
+    payment_breakdown: paymentState.paymentBreakdown,
     paid_amount: paidAmount,
     outstanding_amount: outstandingAmount,
     party_balance: partyBalance,
@@ -995,26 +1101,43 @@ function syncRetailSettlementUi(mode = retailBillingMode) {
   const settlementType = retailField(mode, "settlementType");
   const paymentMode = retailField(mode, "paymentMode");
   const paidAmount = retailField(mode, "paidAmount");
+  const paymentSection = document.getElementById("retailPaymentBreakdownSection");
+  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
 
   if (!settlementType || !paymentMode || !paidAmount) return;
 
   const settlementValue = settlementType.value || "paid";
+  if (paymentRows && paymentRows.children.length === 0) {
+    addRetailPaymentRow(null, { skipDirty: true });
+  }
 
   if (settlementValue === "credit") {
     paymentMode.value = "Credit";
     paidAmount.value = "0";
     paidAmount.disabled = true;
     paidAmount.placeholder = "Paid amount (0 for credit)";
-  } else if (settlementValue === "paid") {
-    if (paymentMode.value === "Credit") paymentMode.value = "Cash";
-    paidAmount.disabled = true;
-    paidAmount.value = "";
-    paidAmount.placeholder = "Paid automatically as full bill";
+    if (paymentSection) paymentSection.style.display = "none";
   } else {
-    if (paymentMode.value === "Credit") paymentMode.value = "Cash";
+    if (paymentSection) paymentSection.style.display = "";
     paidAmount.disabled = false;
-    paidAmount.placeholder = "Paid amount";
+    paidAmount.placeholder = "Paid amount (auto)";
   }
+
+  if (settlementValue === "paid" && paymentRows) {
+    const firstRow = paymentRows.querySelector(".retail-payment-row");
+    const allAmounts = Array.from(paymentRows.querySelectorAll(".retailPaymentSplitAmount"));
+    const hasPositiveAmount = allAmounts.some(input => Number(input.value || 0) > 0);
+    if (firstRow && !hasPositiveAmount) {
+      const firstAmount = firstRow.querySelector(".retailPaymentSplitAmount");
+      const totalAmount = getRetailEstimatedTotal(mode);
+      firstAmount.value = totalAmount > 0 ? totalAmount.toFixed(2) : "";
+    }
+  }
+
+  const paymentState = getRetailPaymentBreakdownState(mode);
+  paymentMode.value = paymentState.paymentMode || (settlementValue === "credit" ? "Credit" : "Cash");
+  paidAmount.value = paymentState.paidAmount > 0 ? Number(paymentState.paidAmount).toFixed(2) : (settlementValue === "credit" ? "0.00" : "");
+  paidAmount.readOnly = true;
 }
 
 function populateRetailFormFromBill(bill) {
@@ -1039,6 +1162,16 @@ function populateRetailFormFromBill(bill) {
   retailField(billMode, "iceAmount").value = bill.ice_amount ?? "";
   retailField(billMode, "paidAmount").value = bill.paid_amount ?? "";
   retailField(billMode, "notes").value = bill.notes || "";
+  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
+  if (paymentRows) paymentRows.innerHTML = "";
+  const breakdown = Array.isArray(bill.payment_breakdown) && bill.payment_breakdown.length
+    ? bill.payment_breakdown
+    : (paidAmount > 0 ? [{ mode: bill.payment_mode || "Cash", amount: paidAmount }] : []);
+  if (breakdown.length) {
+    breakdown.forEach(entry => addRetailPaymentRow(entry, { skipDirty: true }));
+  } else {
+    addRetailPaymentRow(null, { skipDirty: true });
+  }
   syncRetailSettlementUi(billMode);
   if (settlementType === "partial") {
     retailField(billMode, "paidAmount").value = bill.paid_amount ?? "";
@@ -1107,6 +1240,16 @@ async function saveRetailBill(options = {}) {
     return;
   }
 
+  const splitPaidAmount = (draft.payment_breakdown || []).reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
+  if (splitPaidAmount - Number(draft.total_amount || 0) > 0.001) {
+    showToast("Split payment total cannot exceed bill total");
+    return;
+  }
+  if (draft.settlement_type === "paid" && Math.abs(splitPaidAmount - Number(draft.total_amount || 0)) > 0.001) {
+    showToast("For paid in full, split payments must match the full bill total");
+    return;
+  }
+
   if (draft.outstanding_amount > 0 && !draft.customer_name) {
     showToast("Enter customer name for credit retail bill");
     return;
@@ -1128,6 +1271,7 @@ async function saveRetailBill(options = {}) {
       customer_phone: draft.customer_phone,
       customer_address: draft.customer_address,
       payment_mode: draft.payment_mode,
+      payment_breakdown: draft.payment_breakdown,
       paid_amount: draft.paid_amount,
       ice_amount: draft.ice_amount,
       notes: draft.notes,
@@ -1612,7 +1756,13 @@ function getRetailBillShareText(bill) {
   lines.push(`Total Amount: Rs ${formatBillMoney(bill.total_amount)}`);
   lines.push(`Received: Rs ${formatBillMoney(bill.paid_amount)}`);
   lines.push(`Remaining: Rs ${formatBillMoney(receiptOutstanding)}`);
-  lines.push(`Mode: ${bill.payment_mode || "Cash"}`);
+  if (Array.isArray(bill.payment_breakdown) && bill.payment_breakdown.length) {
+    bill.payment_breakdown.forEach(entry => {
+      lines.push(`${entry.mode}: Rs ${formatBillMoney(entry.amount)}`);
+    });
+  } else {
+    lines.push(`Mode: ${bill.payment_mode || "Cash"}`);
+  }
   if (bill.notes) {
     lines.push(`Notes: ${bill.notes}`);
   }
@@ -1879,6 +2029,9 @@ function resetRetailForm() {
   retailField("regular", "paymentMode").value = "Cash";
   retailField("regular", "cashier").value = "admin";
   retailField("regular", "date").value = formatDateInput(new Date());
+  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
+  if (paymentRows) paymentRows.innerHTML = "";
+  addRetailPaymentRow(null, { skipDirty: true });
   syncRetailSettlementUi();
 
   if (retailBillingMode === "dressed") {
@@ -2292,6 +2445,10 @@ function getRetailReceiptMarkup(bill) {
       ${bill.customer_address ? `<p><strong>Customer Add</strong> : ${escapeHtml(bill.customer_address)}</p>` : ""}
     </div>
   ` : "";
+  const paymentBreakdown = Array.isArray(bill.payment_breakdown) ? bill.payment_breakdown.filter(entry => Number(entry.amount || 0) > 0) : [];
+  const paymentBreakdownHtml = paymentBreakdown.map(entry => (
+    `<p><span>${escapeHtml(entry.mode || "Cash")} Payment</span><strong>${formatBillMoney(entry.amount)}</strong></p>`
+  )).join("");
 
   return `
     <div class="thermal-bill">
@@ -2363,7 +2520,7 @@ function getRetailReceiptMarkup(bill) {
         ${Number(bill.ice_amount || 0) > 0 ? `<p><span>Items Total</span><strong>${formatBillMoney(bill.items_subtotal_amount ?? (Number(bill.total_amount || 0) - Number(bill.ice_amount || 0)))}</strong></p>` : ""}
         ${Number(bill.ice_amount || 0) > 0 ? `<p><span>Ice Amount</span><strong>${formatBillMoney(bill.ice_amount)}</strong></p>` : ""}
         ${Number(bill.ice_amount || 0) > 0 ? `<p class="thermal-total"><span>TOTAL</span><strong>${formatBillMoney(bill.total_amount)}</strong></p>` : ""}
-        <p><span>${escapeHtml(bill.payment_mode || "Cash")} Payment</span><strong>${formatBillMoney(bill.paid_amount)}</strong></p>
+        ${paymentBreakdownHtml || `<p><span>${escapeHtml(bill.payment_mode || "Cash")} Payment</span><strong>${formatBillMoney(bill.paid_amount)}</strong></p>`}
         <p><span>Outstanding balance</span><strong>${formatBillMoney(receiptOutstanding)}</strong></p>
       </div>
 
@@ -2481,6 +2638,7 @@ function queueRetailBillForSync(draft) {
     local_only: true,
     sync_status: "Pending Sync",
     payment_mode: draft.payment_mode || "Cash",
+    payment_breakdown: Array.isArray(draft.payment_breakdown) ? draft.payment_breakdown : [],
     pending_since: new Date().toISOString(),
     last_error: "No internet connection"
   };
@@ -2566,6 +2724,7 @@ async function syncPendingRetailBills(silent = false) {
         customer_phone: bill.customer_phone,
         customer_address: bill.customer_address,
         payment_mode: bill.payment_mode,
+        payment_breakdown: bill.payment_breakdown,
         paid_amount: bill.paid_amount,
         ice_amount: bill.ice_amount,
         notes: bill.notes,
