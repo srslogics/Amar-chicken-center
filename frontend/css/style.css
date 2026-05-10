@@ -1068,18 +1068,18 @@ input[type="file"] {
 
 #retailSettlementType {
   min-height: 42px;
-  border: 1.5px solid rgb(228 194 163 / 0.28);
+  border: 1.5px solid rgb(180 142 114 / 0.28);
   border-radius: 12px;
-  background: linear-gradient(180deg, rgb(78 62 53 / 0.95) 0%, rgb(50 40 34 / 0.98) 100%);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.98) 0%, rgb(246 236 227 / 0.98) 100%);
   color: var(--ink-strong);
   font-size: 15px;
-  font-weight: 700;
-  box-shadow: 0 0 0 3px rgb(228 194 163 / 0.06);
+  font-weight: 800;
+  box-shadow: 0 0 0 3px rgb(180 142 114 / 0.06), 0 8px 18px rgb(108 76 49 / 0.08);
 }
 
 #retailSettlementType:focus-visible {
-  outline: 3px solid rgb(228 194 163 / 0.18);
-  box-shadow: 0 0 0 5px rgb(228 194 163 / 0.1);
+  outline: 3px solid rgb(180 142 114 / 0.2);
+  box-shadow: 0 0 0 5px rgb(180 142 114 / 0.1), 0 10px 20px rgb(108 76 49 / 0.1);
 }
 
 .retail-notes-grid {
