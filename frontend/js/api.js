@@ -1,9 +1,14 @@
 const DEFAULT_BASE_URL = "https://stockpilot-backend-bvq9.onrender.com";
 const BASE_URL = (
   window.STOCKPILOT_API_URL ||
-  localStorage.getItem("STOCKPILOT_API_URL") ||
   DEFAULT_BASE_URL
 ).replace(/\/$/, "");
+
+try {
+  localStorage.removeItem("STOCKPILOT_API_URL");
+} catch (e) {
+  // Ignore storage access issues in locked-down browsers.
+}
 
 let activeRequests = 0;
 const responseCache = new Map();

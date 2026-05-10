@@ -80,6 +80,8 @@ async function bootAuth() {
 
     if (!setup.has_users) {
       authNeedsSetup = true;
+      localStorage.removeItem("STOCKPILOT_AUTH_TOKEN");
+      localStorage.removeItem("STOCKPILOT_AUTH_USER");
       currentUser = null;
       updateAuthUi();
       renderLoginScreen(true);
