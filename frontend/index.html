@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>SrS Logics | StockPilot Dashboard</title>
+
+  <!-- Favicon -->
+  <link rel="icon" href="assets/srs-logics-logo-small.png?v=20260504-1">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="css/style.css?v=20260504-1">
+
+  <!-- Charts & icons -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+</head>
+
+<body>
+
+<div class="app">
+
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <img src="assets/srs-logics-logo-small.png" alt="SrS Logics">
+      <div>
+        <strong>StockPilot</strong>
+        <span>by SrS Logics</span>
+      </div>
+    </div>
+
+    <nav class="menu" aria-label="Primary navigation">
+      <button type="button" id="menu-dashboard" onclick="loadPage('dashboard')"><i data-lucide="layout-dashboard"></i><span>Dashboard</span></button>
+      <button type="button" id="menu-retail" onclick="loadPage('retail')"><i data-lucide="receipt-text"></i><span>Retail Billing</span></button>
+      <button type="button" id="menu-upload" onclick="loadPage('upload')"><i data-lucide="upload-cloud"></i><span>Upload</span></button>
+      <button type="button" id="menu-analytics" onclick="loadPage('analytics')"><i data-lucide="chart-no-axes-combined"></i><span>Analytics</span></button>
+      <button type="button" id="menu-ledger" onclick="loadPage('ledger')"><i data-lucide="book-open-check"></i><span>Ledger</span></button>
+      <button type="button" id="menu-daily-sheet" onclick="loadPage('daily-sheet')"><i data-lucide="sheet"></i><span>Daily Sheet</span></button>
+      <button type="button" id="menu-access-control" onclick="loadPage('access-control')"><i data-lucide="shield-check"></i><span>Access Control</span></button>
+      <button type="button" id="menu-reports" onclick="loadPage('reports')"><i data-lucide="file-down"></i><span>Reports</span></button>
+    </nav>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+
+    <!-- Topbar -->
+    <div class="topbar">
+      <div class="top-left">
+        <h1 id="pageTitle">Dashboard</h1>
+      </div>
+
+      <div class="top-right">
+        <span id="authMeta"></span>
+        <button type="button" id="authButton" onclick="handleAuthButton()">Login</button>
+        <span id="todayDate"></span>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div id="content">
+      <div class="container">
+        <p>Loading...</p>
+      </div>
+    </div>
+
+  </main>
+
+</div>
+
+<!-- Toast -->
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="globalLoader" class="global-loader" role="status" aria-live="polite" aria-hidden="true">
+  <div class="loader-card">
+    <span class="loader-spinner"></span>
+    <strong id="loaderText">Processing...</strong>
+  </div>
+</div>
+
+<!-- Scripts (order matters) -->
+<script src="js/api.js?v=20260504-1"></script>
+<script src="js/app.js?v=20260504-1"></script>
+<script src="js/upload.js?v=20260504-1"></script>
+<script src="js/dashboard.js?v=20260504-1"></script>
+<script src="js/ledger.js?v=20260504-1"></script>
+<script src="js/analytics.js?v=20260504-1"></script>
+<script src="js/retail.js?v=20260504-1"></script>
+<script src="js/daily-sheet.js?v=20260504-1"></script>
+<script src="js/reports.js?v=20260504-1"></script>
+
+</body>
+</html>
