@@ -4,14 +4,14 @@
   --surface: rgb(255 252 248 / 0.9);
   --surface-strong: #fffdfb;
   --surface-soft: rgb(246 236 225 / 0.78);
-  --ink: #3e2f26;
-  --ink-strong: #241913;
-  --muted: #83695a;
+  --ink: #2f231c;
+  --ink-strong: #1d140f;
+  --muted: #654d3f;
   --line: rgb(180 142 114 / 0.18);
   --line-strong: rgb(180 142 114 / 0.32);
   --brand: #c8a17a;
   --brand-dark: #9d7656;
-  --brand-strong: #af7f57;
+  --brand-strong: #8a5f3d;
   --sidebar: #f1e3d5;
   --sidebar-soft: #ead7c6;
   --success: #6aa585;
@@ -265,7 +265,7 @@ select {
 }
 
 input::placeholder {
-  color: #9f8978;
+  color: #7c6150;
 }
 
 input[type="file"] {
@@ -341,7 +341,7 @@ input[type="file"] {
 .page-subtitle {
   max-width: 680px;
   margin: 10px 0 0;
-  color: var(--muted);
+  color: #5e4638;
   font-size: 14px;
   line-height: 1.55;
 }
@@ -355,7 +355,7 @@ input[type="file"] {
   border: 1px solid var(--line);
   border-radius: 999px;
   background: rgb(255 251 247 / 0.84);
-  color: var(--muted);
+  color: #5f4a3d;
   font-weight: 700;
   box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.04);
 }
@@ -464,7 +464,7 @@ input[type="file"] {
 .dashboard-intro p {
   max-width: 820px;
   margin: 10px 0 0;
-  color: var(--muted);
+  color: #5d473a;
   font-size: 15px;
   line-height: 1.55;
 }
@@ -546,7 +546,7 @@ input[type="file"] {
   position: relative;
   z-index: 1;
   display: block;
-  color: #ccb19c;
+  color: #735744;
   opacity: 1;
   font-size: 13px;
   font-weight: 800;
@@ -570,7 +570,7 @@ input[type="file"] {
   position: relative;
   z-index: 1;
   margin: 12px 0 0;
-  color: #bca591;
+  color: #6a5345;
   opacity: 1;
   font-size: 13px;
   line-height: 1.45;
@@ -675,7 +675,7 @@ input[type="file"] {
 
 .dashboard-insights-card li {
   margin-bottom: 10px;
-  color: #d2bcac;
+  color: #5f493c;
   line-height: 1.5;
 }
 
@@ -872,7 +872,7 @@ input[type="file"] {
 .metric span {
   position: relative;
   z-index: 1;
-  color: #ccb09a;
+  color: #755948;
   font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -897,7 +897,7 @@ input[type="file"] {
   position: relative;
   z-index: 1;
   margin-top: 10px;
-  color: #c0aa98;
+  color: #685244;
   font-size: 13px;
   line-height: 1.35;
 }
@@ -1131,7 +1131,7 @@ input[type="file"] {
 
 .retail-shortcuts-head p {
   margin: 0;
-  color: var(--muted);
+  color: #5e473a;
   font-size: 13px;
   line-height: 1.45;
 }
@@ -1350,7 +1350,7 @@ input[type="file"] {
 
 .typeahead-option span {
   font-size: 12px;
-  color: var(--muted);
+  color: #654d3f;
 }
 
 .retail-shortcut-list-managed {
@@ -1492,7 +1492,7 @@ input[type="file"] {
   align-items: center;
   justify-content: center;
   width: 100%;
-  color: #bca591;
+  color: #6b5445;
   font-weight: 600;
   text-align: center;
 }
@@ -1885,7 +1885,7 @@ tbody tr:hover {
 
 .empty {
   padding: 24px;
-  color: #aa9381;
+  color: #6f5849;
   text-align: center;
   white-space: normal;
   line-height: 1.45;
@@ -1917,7 +1917,7 @@ tbody tr:hover {
 
 .summary-box span {
   font-size: 13px;
-  color: #ccb29c;
+  color: #745948;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -1993,7 +1993,7 @@ canvas {
 
 .insights li {
   margin-bottom: 8px;
-  color: #d0b7a3;
+  color: #5d473a;
 }
 
 #toast {
