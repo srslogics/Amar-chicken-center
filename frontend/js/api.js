@@ -1,4 +1,4 @@
-const DEFAULT_BASE_URL = "https://stockpilot-backend-bvq9.onrender.com";
+const DEFAULT_BASE_URL = "https://amar-chicken-center.onrender.com";
 const BASE_URL = (
   window.STOCKPILOT_API_URL ||
   DEFAULT_BASE_URL
