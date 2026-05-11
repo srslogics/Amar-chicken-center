@@ -1487,7 +1487,6 @@ async function loadRetailBills() {
     const params = new URLSearchParams();
     if (date) params.set("date", date);
     const query = params.toString();
-    const pendingBills = getPendingRetailBills().filter(bill => !date || bill.date === date);
     const data = navigator.onLine
       ? await optionalApiCall(
           `/retail-bills${query ? `?${query}` : ""}`,
@@ -1497,6 +1496,10 @@ async function loadRetailBills() {
           { cache: false }
         )
       : { results: [] };
+    const reconciledPendingBills = navigator.onLine
+      ? reconcilePendingRetailBillsWithServer(data.results || [])
+      : getPendingRetailBills();
+    const pendingBills = reconciledPendingBills.filter(bill => !date || bill.date === date);
 
     const mergedResults = mergeRetailBillResults(data.results || [], pendingBills);
     const visibleResults = mergedResults.filter(bill => normalizeRetailBillMode(bill) === retailBillingMode);
@@ -2727,8 +2730,37 @@ function computeNextRetailBillNumber(date, baseline = "1") {
   return String(Math.max(baseValue, maxPending + 1));
 }
 
+function retailBillFingerprint(bill) {
+  const totalAmount = Number(bill?.total_amount || 0).toFixed(2);
+  const customerName = String(bill?.customer_name || "").trim().toLowerCase();
+  const mode = normalizeRetailBillMode(bill);
+  return [
+    String(bill?.date || ""),
+    String(bill?.bill_number || ""),
+    customerName,
+    totalAmount,
+    mode
+  ].join("|");
+}
+
+function reconcilePendingRetailBillsWithServer(serverBills = []) {
+  const pendingBills = getPendingRetailBills();
+  if (!pendingBills.length || !serverBills.length) return pendingBills;
+
+  const serverFingerprints = new Set(serverBills.map(retailBillFingerprint));
+  const remainingPending = pendingBills.filter(bill => !serverFingerprints.has(retailBillFingerprint(bill)));
+
+  if (remainingPending.length !== pendingBills.length) {
+    setPendingRetailBills(remainingPending);
+  }
+
+  return remainingPending;
+}
+
 function mergeRetailBillResults(serverBills, pendingBills) {
-  const merged = [...pendingBills, ...serverBills];
+  const serverFingerprints = new Set(serverBills.map(retailBillFingerprint));
+  const uniquePending = pendingBills.filter(bill => !serverFingerprints.has(retailBillFingerprint(bill)));
+  const merged = [...uniquePending, ...serverBills];
   return merged.sort((a, b) => {
     if ((a.date || "") !== (b.date || "")) return (b.date || "").localeCompare(a.date || "");
     return Number(String(b.bill_number || "").replace(/\D/g, "")) - Number(String(a.bill_number || "").replace(/\D/g, ""));
@@ -2844,6 +2876,25 @@ async function syncPendingRetailBills(silent = false) {
       }), { "Content-Type": "application/json" }, { loader: false });
 
       if (response?.error) {
+        if (String(response.error).toLowerCase().includes("bill number already exists")) {
+          const lookup = await optionalApiCall(
+            `/retail-bills?date=${encodeURIComponent(bill.date || "")}`,
+            { results: [] },
+            "GET",
+            null,
+            { cache: false }
+          );
+          const existingBill = (lookup.results || []).find(serverBill => retailBillFingerprint(serverBill) === retailBillFingerprint(bill));
+          if (existingBill) {
+            syncedCount += 1;
+            setRetailLastSyncStage(`bill ${bill.bill_number || ""} already on server`.trim());
+            if (currentRetailBill?.id === bill.id) {
+              currentRetailBill = existingBill;
+              populateRetailFormFromBill(existingBill);
+            }
+            continue;
+          }
+        }
         remaining.push({ ...bill, last_error: response.error });
         continue;
       }
