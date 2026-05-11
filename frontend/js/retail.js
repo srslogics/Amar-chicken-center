@@ -15,6 +15,7 @@ const RETAIL_SHORTCUT_ITEMS = [
 ];
 const RETAIL_PENDING_STORAGE_KEY = "stockpilot.retail.pending";
 const RETAIL_SHORTCUT_STORAGE_KEY = "stockpilot.retail.shortcuts";
+const RETAIL_SYNC_DEBUG_VERSION = "2026-05-11-sync-debug-1";
 
 let retailItemSuggestTimer = null;
 let retailCustomerSuggestTimer = null;
@@ -2700,6 +2701,16 @@ function retailSyncAuthMessage() {
   return "Please login again to sync saved bills";
 }
 
+function getRetailSyncDebugState() {
+  const pendingBills = getPendingRetailBills();
+  return {
+    version: RETAIL_SYNC_DEBUG_VERSION,
+    online: navigator.onLine ? "online" : "offline",
+    hasAuth: hasRetailSyncAuth() ? "yes" : "no",
+    pending: pendingBills.length
+  };
+}
+
 function computeNextRetailBillNumber(date, baseline = "1") {
   const pendingBills = getPendingRetailBills();
   const maxPending = pendingBills.reduce((maxValue, bill) => {
@@ -2742,12 +2753,19 @@ function renderRetailOfflineBanner() {
   const failureText = failureMessage
     ? `<p class="offline-banner-error">Last sync issue: ${escapeHtml(failureMessage)}</p>`
     : "";
+  const debug = getRetailSyncDebugState();
+  const debugText = `
+    <p class="offline-banner-debug">
+      Sync status: ${escapeHtml(debug.version)} | ${escapeHtml(debug.online)} | login ${escapeHtml(debug.hasAuth)} | pending ${escapeHtml(String(debug.pending))}
+    </p>
+  `;
 
   banner.className = `notice ${navigator.onLine ? "warning" : "info"}`;
   banner.style.display = "block";
   banner.innerHTML = `
     <strong>${statusText}</strong>
     ${failureText}
+    ${debugText}
     <div class="offline-banner-actions">
       <button type="button" onclick="syncPendingRetailBills()">${navigator.onLine ? "Sync Now" : "Retry When Online"}</button>
     </div>
