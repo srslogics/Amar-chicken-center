@@ -2711,7 +2711,8 @@ function renderRetailOfflineBanner() {
   const banner = document.getElementById("retailOfflineBanner");
   if (!banner) return;
 
-  const pendingCount = getPendingRetailBills().length;
+  const pendingBills = getPendingRetailBills();
+  const pendingCount = pendingBills.length;
   if (navigator.onLine && pendingCount === 0) {
     banner.style.display = "none";
     banner.innerHTML = "";
@@ -2721,13 +2722,19 @@ function renderRetailOfflineBanner() {
   const statusText = navigator.onLine
     ? `${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} waiting to sync.`
     : `Offline mode. ${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} saved locally.`;
+  const failedBill = pendingBills.find(bill => bill.last_error);
+  const failureText = failedBill?.last_error
+    ? `<p class="offline-banner-error">Last sync issue: ${escapeHtml(failedBill.last_error)}</p>`
+    : "";
 
   banner.className = `notice ${navigator.onLine ? "warning" : "info"}`;
   banner.style.display = "block";
   banner.innerHTML = `
     <strong>${statusText}</strong>
+    ${failureText}
     <div class="offline-banner-actions">
       <button type="button" onclick="syncPendingRetailBills()">${navigator.onLine ? "Sync Now" : "Retry When Online"}</button>
+      <button type="button" onclick="clearPendingRetailBills()">Clear Pending</button>
     </div>
   `;
 }
@@ -2787,7 +2794,17 @@ async function syncPendingRetailBills(silent = false) {
 
   if (!silent && syncedCount > 0) {
     showToast(`${syncedCount} offline retail bill${syncedCount === 1 ? "" : "s"} synced`);
+  } else if (!silent && remaining.length > 0) {
+    const firstError = remaining.find(bill => bill.last_error)?.last_error || "Sync failed";
+    showToast(firstError);
   }
+}
+
+function clearPendingRetailBills() {
+  setPendingRetailBills([]);
+  renderRetailOfflineBanner();
+  loadRetailBills();
+  showToast("Cleared pending offline bills");
 }
 
 function attachRetailConnectivityListeners() {

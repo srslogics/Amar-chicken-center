@@ -1109,6 +1109,12 @@ input[type="file"] {
   margin-top: 10px;
 }
 
+.offline-banner-error {
+  margin: 10px 0 0;
+  color: #8a2f2f;
+  font-weight: 700;
+}
+
 .offline-banner-actions button {
   min-height: 36px;
   padding: 8px 14px;
