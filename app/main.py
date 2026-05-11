@@ -295,6 +295,14 @@ PUBLIC_PATH_PREFIXES = (
 PUBLIC_PATHS = {"/"}
 
 
+def cors_json_error(status_code: int, message: str):
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": message},
+        headers={"Access-Control-Allow-Origin": "*"}
+    )
+
+
 @app.middleware("http")
 async def auth_middleware(request, call_next):
     path = request.url.path
@@ -308,10 +316,10 @@ async def auth_middleware(request, call_next):
     try:
         session = get_active_session(db, token)
         if not session:
-            return JSONResponse(status_code=401, content={"error": "Authentication required"})
+            return cors_json_error(401, "Authentication required")
         user = db.query(models.User).filter(models.User.id == session.user_id).first()
         if not user or str(user.is_active or "true").lower() != "true":
-            return JSONResponse(status_code=401, content={"error": "Authentication required"})
+            return cors_json_error(401, "Authentication required")
     finally:
         db.close()
 

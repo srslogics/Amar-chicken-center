@@ -2734,7 +2734,6 @@ function renderRetailOfflineBanner() {
     ${failureText}
     <div class="offline-banner-actions">
       <button type="button" onclick="syncPendingRetailBills()">${navigator.onLine ? "Sync Now" : "Retry When Online"}</button>
-      <button type="button" onclick="clearPendingRetailBills()">Clear Pending</button>
     </div>
   `;
 }
@@ -2798,13 +2797,6 @@ async function syncPendingRetailBills(silent = false) {
     const firstError = remaining.find(bill => bill.last_error)?.last_error || "Sync failed";
     showToast(firstError);
   }
-}
-
-function clearPendingRetailBills() {
-  setPendingRetailBills([]);
-  renderRetailOfflineBanner();
-  loadRetailBills();
-  showToast("Cleared pending offline bills");
 }
 
 function attachRetailConnectivityListeners() {
