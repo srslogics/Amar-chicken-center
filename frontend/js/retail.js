@@ -43,6 +43,7 @@ const retailPartyBalanceByMode = {
 };
 let retailSuggestHideTimer = null;
 const RETAIL_PAYMENT_MODES = ["Cash", "Online", "Bank", "Cheque"];
+let retailLastSyncStage = "";
 
 const RETAIL_MODE_FIELDS = {
   regular: {
@@ -2711,6 +2712,10 @@ function getRetailSyncDebugState() {
   };
 }
 
+function setRetailLastSyncStage(message = "") {
+  retailLastSyncStage = message;
+}
+
 function computeNextRetailBillNumber(date, baseline = "1") {
   const pendingBills = getPendingRetailBills();
   const maxPending = pendingBills.reduce((maxValue, bill) => {
@@ -2759,6 +2764,9 @@ function renderRetailOfflineBanner() {
       Sync status: ${escapeHtml(debug.version)} | ${escapeHtml(debug.online)} | login ${escapeHtml(debug.hasAuth)} | pending ${escapeHtml(String(debug.pending))}
     </p>
   `;
+  const stageText = retailLastSyncStage
+    ? `<p class="offline-banner-debug">Sync step: ${escapeHtml(retailLastSyncStage)}</p>`
+    : "";
 
   banner.className = `notice ${navigator.onLine ? "warning" : "info"}`;
   banner.style.display = "block";
@@ -2766,6 +2774,7 @@ function renderRetailOfflineBanner() {
     <strong>${statusText}</strong>
     ${failureText}
     ${debugText}
+    ${stageText}
     <div class="offline-banner-actions">
       <button type="button" onclick="syncPendingRetailBills()">${navigator.onLine ? "Sync Now" : "Retry When Online"}</button>
     </div>
@@ -2774,21 +2783,41 @@ function renderRetailOfflineBanner() {
 
 async function syncPendingRetailBills(silent = false) {
   if (!navigator.onLine) {
+    setRetailLastSyncStage("offline");
     renderRetailOfflineBanner();
     return;
   }
 
   const pendingBills = getPendingRetailBills();
   if (!pendingBills.length) {
+    setRetailLastSyncStage("no pending bills");
     renderRetailOfflineBanner();
     return;
   }
 
   if (!hasRetailSyncAuth()) {
     const authError = retailSyncAuthMessage();
+    setRetailLastSyncStage("missing login token");
     setPendingRetailBills(pendingBills.map(bill => ({ ...bill, last_error: authError })));
     renderRetailOfflineBanner();
     if (!silent) showToast(authError);
+    return;
+  }
+
+  setRetailLastSyncStage("checking server");
+  renderRetailOfflineBanner();
+
+  try {
+    await apiCall("/healthz", "GET", null, {}, { loader: false, cache: false });
+    setRetailLastSyncStage("server reachable");
+    renderRetailOfflineBanner();
+    await apiCall("/auth/me", "GET", null, {}, { loader: false, cache: false });
+    setRetailLastSyncStage("session verified");
+    renderRetailOfflineBanner();
+  } catch (e) {
+    setRetailLastSyncStage(`pre-check failed: ${String(e?.message || e || "unknown error")}`);
+    renderRetailOfflineBanner();
+    if (!silent) showToast(String(e?.message || e || "Sync failed"));
     return;
   }
 
@@ -2797,6 +2826,8 @@ async function syncPendingRetailBills(silent = false) {
 
   for (const bill of pendingBills) {
     try {
+      setRetailLastSyncStage(`posting bill ${bill.bill_number || ""}`.trim());
+      renderRetailOfflineBanner();
       const response = await apiCall("/retail-bills", "POST", JSON.stringify({
         date: bill.date,
         bill_number: bill.bill_number,
@@ -2822,11 +2853,13 @@ async function syncPendingRetailBills(silent = false) {
         populateRetailFormFromBill(response.bill);
       }
       syncedCount += 1;
+      setRetailLastSyncStage(`bill ${bill.bill_number || ""} synced`.trim());
     } catch (e) {
       const rawError = String(e?.message || e || "Sync failed");
       const friendlyError = /auth_required|authentication required/i.test(rawError)
         ? retailSyncAuthMessage()
         : rawError;
+      setRetailLastSyncStage(`post failed: ${friendlyError}`);
       remaining.push({ ...bill, last_error: friendlyError });
     }
   }
