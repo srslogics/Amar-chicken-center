@@ -2688,6 +2688,18 @@ function shouldQueueRetailOffline(error) {
   return message.includes("Network") || message.includes("fetch");
 }
 
+function hasRetailSyncAuth() {
+  try {
+    return Boolean(localStorage.getItem("STOCKPILOT_AUTH_TOKEN"));
+  } catch (e) {
+    return false;
+  }
+}
+
+function retailSyncAuthMessage() {
+  return "Please login again to sync saved bills";
+}
+
 function computeNextRetailBillNumber(date, baseline = "1") {
   const pendingBills = getPendingRetailBills();
   const maxPending = pendingBills.reduce((maxValue, bill) => {
@@ -2722,9 +2734,13 @@ function renderRetailOfflineBanner() {
   const statusText = navigator.onLine
     ? `${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} waiting to sync.`
     : `Offline mode. ${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} saved locally.`;
+  const needsAuth = navigator.onLine && pendingCount > 0 && !hasRetailSyncAuth();
   const failedBill = pendingBills.find(bill => bill.last_error);
-  const failureText = failedBill?.last_error
-    ? `<p class="offline-banner-error">Last sync issue: ${escapeHtml(failedBill.last_error)}</p>`
+  const failureMessage = needsAuth
+    ? retailSyncAuthMessage()
+    : (failedBill?.last_error || "");
+  const failureText = failureMessage
+    ? `<p class="offline-banner-error">Last sync issue: ${escapeHtml(failureMessage)}</p>`
     : "";
 
   banner.className = `notice ${navigator.onLine ? "warning" : "info"}`;
@@ -2747,6 +2763,14 @@ async function syncPendingRetailBills(silent = false) {
   const pendingBills = getPendingRetailBills();
   if (!pendingBills.length) {
     renderRetailOfflineBanner();
+    return;
+  }
+
+  if (!hasRetailSyncAuth()) {
+    const authError = retailSyncAuthMessage();
+    setPendingRetailBills(pendingBills.map(bill => ({ ...bill, last_error: authError })));
+    renderRetailOfflineBanner();
+    if (!silent) showToast(authError);
     return;
   }
 
@@ -2781,7 +2805,11 @@ async function syncPendingRetailBills(silent = false) {
       }
       syncedCount += 1;
     } catch (e) {
-      remaining.push({ ...bill, last_error: String(e?.message || e || "Sync failed") });
+      const rawError = String(e?.message || e || "Sync failed");
+      const friendlyError = /auth_required|authentication required/i.test(rawError)
+        ? retailSyncAuthMessage()
+        : rawError;
+      remaining.push({ ...bill, last_error: friendlyError });
     }
   }
 
