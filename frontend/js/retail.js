@@ -1,8 +1,8 @@
 const RETAIL_SHOP_PROFILE = {
-  name: "NP Chicken Shop",
-  proprietor: "Prop. Sandeep S. Alag (Appu)",
-  address: "Shop No. 58, Kamaal Chowk Bazaar, Nagpur",
-  phone: "9371291195 / 7972329562"
+  name: "Amar Chicken Center",
+  proprietor: "",
+  address: "5, Gokulpeth, Nagpur, Maharashtra 440010",
+  phone: "9923500574"
 };
 
 const RETAIL_SHORTCUT_ITEMS = [
