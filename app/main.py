@@ -4207,6 +4207,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     ice_amount = parse_decimal(payload.get("ice_amount"))
     raw_paid_amount = payload.get("paid_amount")
     paid_amount = parse_decimal(raw_paid_amount)
+    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
 
     party_id = None
     if customer_name:
@@ -4385,7 +4386,11 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
             ))
 
     recompute_dressed_stock_remaining(db, target_date)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"error": "Saving retail bill failed", "details": str(e)}
     db.refresh(bill)
 
     saved_items = db.query(models.RetailBillItem).filter(
@@ -4441,6 +4446,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     ice_amount = parse_decimal(payload.get("ice_amount"))
     raw_paid_amount = payload.get("paid_amount")
     paid_amount = parse_decimal(raw_paid_amount)
+    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
 
     party_id = None
     if customer_name:
