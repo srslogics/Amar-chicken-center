@@ -2437,6 +2437,222 @@ table td,
   }
 }
 
+/* Billing clarity pass for faster scanning and fewer mistakes. */
+.retail-layout .section {
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.99), rgb(247 242 236 / 0.98)),
+    #fffdfa;
+  border-color: rgb(114 83 58 / 0.16);
+}
+
+.retail-workbench-head {
+  padding: 10px 12px;
+  border: 1px solid rgb(164 119 77 / 0.16);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgb(255 250 244 / 0.98), rgb(244 233 219 / 0.96));
+}
+
+.retail-bill-details-panel {
+  border-color: rgb(172 117 66 / 0.24);
+  background:
+    linear-gradient(180deg, rgb(255 249 242 / 0.99), rgb(247 236 222 / 0.98)),
+    #fff8f2;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.7), 0 10px 24px rgb(96 64 39 / 0.08);
+}
+
+.retail-shortcuts-panel,
+.retail-shortcut-manager,
+.retail-setup-panel .retail-shortcuts,
+.retail-setup-panel .retail-shortcut-manager {
+  border-color: rgb(123 159 111 / 0.2);
+  background:
+    linear-gradient(180deg, rgb(247 252 246 / 0.98), rgb(235 245 233 / 0.96)),
+    #f7fbf6;
+}
+
+#retailRegularSection,
+#retailDressedSection,
+#paymentReceiptSection {
+  border: 1px solid rgb(95 128 160 / 0.18);
+  background:
+    linear-gradient(180deg, rgb(247 251 255 / 0.98), rgb(235 242 249 / 0.96)),
+    #f7fbff;
+}
+
+.retail-preview-panel {
+  border-color: rgb(67 92 122 / 0.22);
+  background:
+    linear-gradient(180deg, rgb(243 248 252 / 0.98), rgb(231 238 246 / 0.96)),
+    #f4f8fc;
+}
+
+.retail-shortcuts-head span,
+.billing-priority-label {
+  color: #7b4c21;
+}
+
+.retail-shortcuts-head p {
+  color: #5f4734;
+}
+
+.retail-form-grid input,
+.retail-form-grid select,
+.retail-form-grid textarea,
+.retail-item-row input,
+.retail-item-row select,
+.retail-payment-row input,
+.retail-payment-row select {
+  border-color: rgb(128 95 64 / 0.26);
+  background: linear-gradient(180deg, #ffffff 0%, #fbf6f0 100%);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.72), 0 6px 14px rgb(96 64 39 / 0.06);
+}
+
+.retail-form-grid input:focus,
+.retail-form-grid select:focus,
+.retail-form-grid textarea:focus,
+.retail-item-row input:focus,
+.retail-item-row select:focus,
+.retail-payment-row input:focus,
+.retail-payment-row select:focus {
+  border-color: #b4662e;
+  box-shadow: 0 0 0 3px rgb(180 102 46 / 0.16);
+}
+
+#retailSettlementType {
+  border-color: rgb(191 107 38 / 0.36);
+  background: linear-gradient(180deg, #fff7ee 0%, #f8e4cf 100%);
+  color: #6b3d17;
+  box-shadow: 0 0 0 3px rgb(191 107 38 / 0.08), 0 10px 22px rgb(155 102 58 / 0.12);
+}
+
+.retail-mode-switch {
+  border-color: rgb(117 88 63 / 0.2);
+  background: linear-gradient(180deg, rgb(255 249 243 / 0.94), rgb(241 231 218 / 0.9));
+}
+
+.retail-mode-button {
+  color: #6c584a;
+}
+
+.retail-mode-button.active {
+  background: linear-gradient(180deg, #d98945 0%, #b55c23 100%);
+  color: #fffaf6;
+  box-shadow: 0 10px 22px rgb(143 76 34 / 0.28);
+}
+
+.retail-shortcut-chip {
+  border-color: rgb(67 127 85 / 0.22);
+  background: linear-gradient(180deg, rgb(235 248 238 / 0.98), rgb(219 240 225 / 0.96));
+  color: #25613a;
+  font-weight: 800;
+}
+
+.retail-shortcut-chip:hover {
+  background: linear-gradient(180deg, rgb(224 243 229 / 0.98), rgb(204 234 213 / 0.96));
+}
+
+.retail-shortcut-empty {
+  border-color: rgb(104 132 152 / 0.26);
+  background: linear-gradient(180deg, rgb(240 246 251 / 0.96), rgb(231 239 247 / 0.94));
+  color: #506274;
+}
+
+.retail-item-row {
+  border-color: rgb(120 95 70 / 0.18);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(248 243 237 / 0.94));
+}
+
+.retail-item-row-dressed {
+  border-color: rgb(67 127 85 / 0.22);
+  background: linear-gradient(180deg, rgb(242 250 244 / 0.97), rgb(228 242 232 / 0.95));
+}
+
+.retail-payment-row {
+  border-color: rgb(61 118 148 / 0.2);
+  background: linear-gradient(180deg, rgb(245 250 253 / 0.98), rgb(232 242 248 / 0.95));
+}
+
+.report-actions.retail-actions {
+  border-top-color: rgb(125 91 60 / 0.16);
+}
+
+.report-actions.retail-actions button {
+  min-width: 150px;
+  font-weight: 800;
+}
+
+.report-actions.retail-actions button:first-child {
+  background: linear-gradient(180deg, #2fa05e 0%, #227847 100%);
+  border-color: rgb(39 118 71 / 0.34);
+  color: #f8fff9;
+  box-shadow: 0 14px 30px rgb(34 120 71 / 0.24);
+}
+
+.report-actions.retail-actions button:first-child:hover {
+  background: linear-gradient(180deg, #38b167 0%, #278651 100%);
+}
+
+.report-actions.retail-actions button:nth-child(2) {
+  background: linear-gradient(180deg, #d98945 0%, #b45b22 100%);
+  border-color: rgb(180 91 34 / 0.34);
+  color: #fff9f4;
+}
+
+.report-actions.retail-actions button:nth-child(3) {
+  background: linear-gradient(180deg, #5a88c8 0%, #3d679f 100%);
+  border-color: rgb(61 103 159 / 0.34);
+  color: #f7fbff;
+}
+
+.button-secondary.retail-reset-button {
+  background: linear-gradient(180deg, #fff8f1 0%, #f0dfcf 100%);
+  border-color: rgb(168 122 82 / 0.2);
+  color: #7a4f2c;
+}
+
+.button-secondary.retail-reset-button:hover {
+  background: linear-gradient(180deg, #fffaf5 0%, #ebd6c2 100%);
+}
+
+.thermal-preview {
+  background:
+    linear-gradient(180deg, rgb(237 243 248 / 0.98), rgb(226 235 244 / 0.98)),
+    #edf3f8;
+  border-color: rgb(79 103 127 / 0.18);
+}
+
+.thermal-bill {
+  background: #fffaf5;
+  border-color: #cba786;
+  box-shadow: 0 14px 30px rgb(67 47 31 / 0.18);
+}
+
+.thermal-total,
+.thermal-summary strong,
+.thermal-total-row strong {
+  color: #1c140f;
+}
+
+.notice.info {
+  background: linear-gradient(180deg, #eef7ff, #dfeefa);
+  color: #224764;
+}
+
+.notice.success {
+  background: linear-gradient(180deg, #eef9f0, #dbf0de);
+  color: #21593a;
+}
+
+.notice.warning {
+  background: linear-gradient(180deg, #fff5ea, #f6e5d2);
+  color: #7b4c21;
+}
+
+.notice.error {
+  background: linear-gradient(180deg, #fff0ef, #f8dedd);
+  color: #7a2f28;
+}
+
 .table-card {
   overflow-x: auto;
   padding: 0;
