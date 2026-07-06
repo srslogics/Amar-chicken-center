@@ -295,8 +295,11 @@ app.add_middleware(
 PUBLIC_PATH_PREFIXES = (
     "/auth/",
     "/healthz",
+    "/css/",
+    "/js/",
+    "/assets/",
 )
-PUBLIC_PATHS = {"/"}
+PUBLIC_PATHS = {"/", "/favicon.ico", "/health.html"}
 
 
 def cors_json_error(status_code: int, message: str):
