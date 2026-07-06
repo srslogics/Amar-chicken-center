@@ -2,6 +2,7 @@ from uuid import UUID, uuid4
 from io import BytesIO
 from urllib.parse import quote
 from datetime import datetime, timedelta
+from pathlib import Path
 import hashlib
 import hmac
 import json
@@ -19,9 +20,12 @@ from sqlalchemy import case, func, text, or_
 from decimal import Decimal
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response, JSONResponse
+from fastapi.responses import Response, JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI()
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -327,6 +331,8 @@ async def auth_middleware(request, call_next):
 
 @app.get("/")
 def root():
+    if FRONTEND_INDEX.exists():
+        return FileResponse(FRONTEND_INDEX)
     return {"message": "Backend running"}
 
 
@@ -5458,6 +5464,11 @@ def profit_by_item(start_date: str, end_date: str, db: Session = Depends(get_db)
         }
         for row in rows
     ]
+
+
+if FRONTEND_DIR.exists():
+    # Serve the static admin app from the same Render web service as the API.
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=10000)
