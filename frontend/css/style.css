@@ -2423,7 +2423,385 @@ a:hover {
   }
 }
 
-@media (min-width: 761px) and (max-width: 1120px) {
+@media (min-width: 761px) and (max-width: 960px) {
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  .app {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    flex: none;
+    width: 100%;
+    height: auto;
+    padding: 16px 16px 14px;
+    box-shadow: 0 16px 32px rgb(0 0 0 / 0.16);
+  }
+
+  .sidebar::after {
+    display: none;
+  }
+
+  .brand {
+    margin-bottom: 14px;
+    padding: 14px 16px;
+    border-radius: 20px;
+  }
+
+  .brand strong {
+    font-size: 17px;
+  }
+
+  .brand span {
+    margin-top: 6px;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+  }
+
+  .menu {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .menu button {
+    min-height: 52px;
+    padding: 10px 12px;
+    justify-content: center;
+    border-radius: 16px;
+  }
+
+  .menu button.active::before,
+  .menu button:hover::before {
+    top: auto;
+    left: 14px;
+    right: 14px;
+    bottom: 0;
+    width: auto;
+    height: 4px;
+  }
+
+  .menu span {
+    font-size: 13px;
+  }
+
+  .menu svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .main {
+    padding: 18px 16px 30px;
+    overflow-x: hidden;
+  }
+
+  .container,
+  .topbar {
+    width: min(100%, 100%);
+  }
+
+  .topbar {
+    margin-bottom: 18px;
+    padding: 18px 20px;
+    border-radius: 22px;
+    gap: 14px;
+  }
+
+  .topbar h1 {
+    font-size: clamp(2rem, 4vw, 2.6rem);
+  }
+
+  .page-kicker {
+    min-height: 30px;
+    padding: 6px 12px;
+    font-size: 10px;
+  }
+
+  .top-right {
+    max-width: 100%;
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  #authMeta {
+    max-width: 180px;
+  }
+
+  .card,
+  .section {
+    margin-bottom: 18px;
+    padding: 18px;
+    border-radius: 20px;
+  }
+
+  .page-intro {
+    margin-bottom: 16px;
+  }
+
+  .page-intro h2 {
+    font-size: 20px;
+  }
+
+  .section-head {
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .section h2,
+  .card h2,
+  .dashboard-toolbar-copy h3 {
+    font-size: 17px;
+  }
+
+  .kpi-grid,
+  .analytics-kpi-grid,
+  .dashboard-kpi-grid,
+  .dashboard-kpi-grid-secondary,
+  .dashboard-mini-grid,
+  .dashboard-detail-grid,
+  .chart-grid,
+  .daily-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .dashboard-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .dashboard-toolbar-actions {
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .dashboard-toolbar-actions input {
+    width: 180px;
+  }
+
+  .filter,
+  .upload-box,
+  .balance-filter-bar,
+  .search-card,
+  .report-actions {
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+
+  .manual-entry-row,
+  .party-directory-form,
+  .report-form,
+  .retail-billing-grid,
+  .retail-form-grid,
+  .retail-notes-grid,
+  .retail-shortcut-form,
+  .retail-item-row,
+  .retail-item-row-dressed,
+  .dressed-stock-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  }
+
+  .retail-item-row .retailItemName,
+  .retail-shortcut-form > :first-child,
+  .party-directory-form > :first-child {
+    grid-column: 1 / -1;
+  }
+
+  .auth-shell .container,
+  .auth-shell {
+    width: 100%;
+  }
+
+  .auth-card {
+    max-width: 560px;
+    margin: 0 auto;
+  }
+
+  input,
+  select {
+    width: 180px;
+    max-width: 100%;
+  }
+
+  .report-form input,
+  .report-form select,
+  .manual-entry-row input,
+  .manual-entry-row select,
+  .party-directory-form input,
+  .party-directory-form select,
+  .retail-form-grid input,
+  .retail-form-grid select,
+  .retail-item-row input,
+  .retail-item-row select,
+  .retail-item-row-dressed input,
+  .retail-item-row-dressed select,
+  .dressed-stock-row input,
+  .dressed-stock-row select {
+    width: 100%;
+  }
+}
+
+@media (min-width: 961px) and (max-width: 1120px) {
+  .sidebar {
+    flex-basis: 220px;
+    padding: 22px 14px;
+  }
+
+  .sidebar::after {
+    width: 54px;
+    right: -38px;
+  }
+
+  .brand {
+    margin-bottom: 24px;
+    padding: 16px 14px;
+    border-radius: 20px;
+  }
+
+  .brand strong {
+    font-size: 16px;
+  }
+
+  .brand span {
+    margin-top: 6px;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+  }
+
+  .menu {
+    gap: 6px;
+  }
+
+  .menu button {
+    min-height: 44px;
+    padding: 10px 12px 10px 14px;
+    border-radius: 14px;
+  }
+
+  .menu span {
+    font-size: 13px;
+  }
+
+  .menu svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .main {
+    padding: 24px clamp(16px, 2.8vw, 28px) 32px;
+  }
+
+  .container,
+  .topbar {
+    width: min(100%, 980px);
+  }
+
+  .topbar {
+    margin-bottom: 22px;
+    padding: 18px 20px;
+    border-radius: 22px;
+  }
+
+  .topbar h1 {
+    font-size: clamp(2rem, 3.3vw, 2.8rem);
+  }
+
+  .page-kicker {
+    min-height: 30px;
+    padding: 6px 12px;
+    font-size: 10px;
+  }
+
+  .top-right {
+    gap: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+  }
+
+  #authMeta {
+    max-width: 180px;
+  }
+
+  .card,
+  .section {
+    margin-bottom: 18px;
+    padding: 20px;
+    border-radius: 20px;
+  }
+
+  .page-intro {
+    margin-bottom: 16px;
+  }
+
+  .page-intro h2 {
+    font-size: 20px;
+  }
+
+  .section-head {
+    margin-bottom: 14px;
+  }
+
+  .section h2,
+  .card h2,
+  .dashboard-toolbar-copy h3 {
+    font-size: 17px;
+  }
+
+  .dashboard-toolbar {
+    gap: 12px;
+  }
+
+  .dashboard-toolbar-actions {
+    gap: 10px;
+  }
+
+  .dashboard-toolbar-actions input {
+    width: 180px;
+  }
+
+  .dashboard-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+  }
+
+  .dashboard-kpi-grid-secondary,
+  .dashboard-mini-grid,
+  .dashboard-detail-grid,
+  .chart-grid,
+  .daily-metric-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-kpi-card,
+  .dashboard-mini-card,
+  .metric {
+    min-height: unset;
+  }
+
+  .dashboard-kpi-card h2,
+  .dashboard-mini-card h2,
+  .metric h2 {
+    font-size: 24px;
+  }
+
+  input,
+  select {
+    width: 180px;
+  }
+
+  .filter,
+  .upload-box,
+  .report-actions {
+    gap: 10px;
+  }
+
   .kpi-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
