@@ -1853,6 +1853,590 @@ input[type="file"] {
   margin-top: 12px;
 }
 
+/* Dense layout pass to minimize scrolling across the whole app. */
+.sidebar {
+  flex-basis: 232px;
+  padding: 18px 14px;
+}
+
+.brand {
+  margin-bottom: 22px;
+  padding: 16px 16px;
+  border-radius: 20px;
+}
+
+.brand strong {
+  font-size: 16px;
+}
+
+.brand span {
+  margin-top: 5px;
+  font-size: 11px;
+}
+
+.menu {
+  gap: 5px;
+}
+
+.menu button {
+  min-height: 42px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 15px;
+}
+
+.menu span {
+  font-size: 14px;
+}
+
+button {
+  min-height: 38px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+
+input,
+select,
+textarea {
+  min-height: 38px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  font-size: 14px;
+}
+
+.main {
+  padding: 18px clamp(14px, 2.2vw, 28px) 24px;
+}
+
+.container,
+.topbar {
+  width: min(100%, 1180px);
+}
+
+.topbar {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border-radius: 20px;
+}
+
+.topbar h1 {
+  font-size: clamp(1.8rem, 3.1vw, 2.7rem);
+}
+
+.page-kicker {
+  min-height: 28px;
+  padding: 5px 10px;
+  font-size: 10px;
+}
+
+.page-subtitle,
+.dashboard-intro p {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.top-right {
+  padding: 8px 10px;
+  gap: 8px;
+}
+
+#authButton {
+  min-width: 82px;
+  padding: 8px 12px;
+}
+
+.card,
+.section {
+  margin-bottom: 14px;
+  padding: 18px;
+  border-radius: 18px;
+}
+
+.section + .section {
+  margin-top: 12px;
+}
+
+.section h2,
+.card h2 {
+  margin-bottom: 10px;
+  font-size: 16px;
+}
+
+.section-head,
+.dashboard-card-head {
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.grid,
+.dashboard-kpi-grid,
+.dashboard-mini-grid,
+.dashboard-detail-grid,
+.dashboard-chart-grid,
+.chart-grid,
+.daily-metric-strip,
+.analytics-kpi-grid {
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.dashboard-kpi-card,
+.metric,
+.daily-metric-card {
+  min-height: 108px;
+  padding: 16px 16px 15px 18px;
+  border-radius: 18px;
+}
+
+.dashboard-mini-card {
+  min-height: 92px;
+  padding: 14px 16px;
+  border-radius: 16px;
+}
+
+.dashboard-kpi-card h2,
+.metric h2 {
+  margin-top: 10px;
+  font-size: 21px;
+}
+
+.dashboard-mini-card h2 {
+  margin-top: 10px;
+  font-size: 20px;
+}
+
+.dashboard-kpi-card p,
+.dashboard-mini-card p,
+.dashboard-secondary-grid .metric p,
+.daily-metric-card p,
+.sheet-profit-box p {
+  margin-top: 7px;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.dashboard-insights-card ul {
+  margin-top: 6px;
+}
+
+.dashboard-insights-card li {
+  margin-bottom: 6px;
+  line-height: 1.35;
+}
+
+.toolbar {
+  top: 10px;
+}
+
+.filter,
+.upload-box,
+.search-card,
+.report-actions,
+.dashboard-toolbar,
+.dashboard-toolbar-actions,
+.balance-filter-bar {
+  gap: 10px;
+}
+
+.report-actions {
+  margin-top: 12px;
+  padding-top: 12px;
+}
+
+.report-actions button {
+  min-width: 138px;
+}
+
+.table-card {
+  padding: 12px;
+}
+
+table th,
+table td,
+.daily-sheet-table th,
+.daily-sheet-table td {
+  padding: 8px 9px;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.retail-layout {
+  gap: 12px;
+}
+
+.retail-workbench-head {
+  gap: 10px;
+}
+
+.retail-form-grid {
+  gap: 8px;
+}
+
+.retail-notes-grid {
+  margin-top: 10px;
+}
+
+.retail-notes-grid textarea {
+  min-height: 64px;
+}
+
+.retail-shortcuts,
+.retail-shortcut-manager {
+  margin-top: 10px;
+  padding: 10px;
+}
+
+.retail-shortcuts-head {
+  margin-bottom: 8px;
+}
+
+.retail-shortcuts-head span {
+  margin-bottom: 2px;
+  font-size: 11px;
+}
+
+.retail-shortcuts-head p {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.retail-shortcut-list,
+.retail-items,
+.retail-payment-rows,
+.retail-shortcut-list-managed {
+  gap: 8px;
+}
+
+.retail-items {
+  margin-top: 10px;
+}
+
+.retail-items-horizontal {
+  min-height: 72px;
+}
+
+.retail-item-row,
+.retail-payment-row {
+  gap: 8px;
+  padding: 8px;
+  border-radius: 10px;
+}
+
+.retail-item-row button,
+.retail-shortcut-chip,
+.retail-shortcut-empty,
+.offline-banner-actions button,
+.row-remove-button {
+  min-height: 32px;
+  padding: 6px 10px;
+}
+
+.retail-shortcut-chip,
+.retail-shortcut-empty {
+  border-radius: 999px;
+}
+
+.retail-mode-switch {
+  margin-top: 10px;
+  padding: 4px;
+  gap: 6px;
+}
+
+.retail-mode-button {
+  min-height: 34px;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.retail-billing-panel {
+  gap: 10px;
+}
+
+.retail-billing-section,
+.retail-actions,
+.retail-item-actions,
+.retail-setup-panel,
+.retail-saved-subsection {
+  margin-top: 10px;
+}
+
+.retail-preview-panel {
+  padding: 14px;
+}
+
+.thermal-preview {
+  min-height: 340px;
+  padding: 10px;
+}
+
+.thermal-bill {
+  width: min(100%, 252px);
+  padding: 8px 7px 10px;
+  font-size: 11px;
+}
+
+.thermal-center h3 {
+  font-size: 16px;
+}
+
+.thermal-center p,
+.thermal-customer p,
+.thermal-notes,
+.thermal-meta-row,
+.thermal-summary p,
+.thermal-total-row td,
+.thermal-footer p {
+  font-size: 9.5px;
+}
+
+.thermal-items-table th,
+.thermal-items-table td,
+.thermal-subrow td {
+  font-size: 8px;
+  padding: 1px 0;
+}
+
+.thermal-section-row td {
+  padding-top: 3px;
+}
+
+.thermal-total,
+.thermal-footer {
+  margin-top: 6px;
+  padding-top: 5px;
+}
+
+.collapsible-section > summary,
+.section-summary {
+  padding: 10px 12px;
+  font-size: 14px;
+}
+
+.notice {
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+/* Second-stage page-specific compression for the rest of the app. */
+.dashboard-toolbar-copy h3,
+.dashboard-card-head h2,
+.section-head h2,
+.page-intro h2 {
+  font-size: 18px;
+  line-height: 1.18;
+}
+
+.dashboard-toolbar-copy span,
+.dashboard-card-head span,
+.page-intro span,
+.section-head span {
+  margin-bottom: 5px;
+  font-size: 10px;
+}
+
+.dashboard-kpi-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.dashboard-kpi-grid-secondary,
+.dashboard-mini-grid,
+.daily-metric-strip,
+.kpi-grid,
+.analytics-kpi-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.dashboard-detail-grid,
+.chart-grid {
+  gap: 10px;
+}
+
+.dashboard-chart-card,
+.analytics-chart-card {
+  padding-top: 14px;
+}
+
+.chart-card canvas {
+  min-height: 210px;
+  max-height: 240px;
+}
+
+.daily-sheet-section + .daily-sheet-section,
+.sheet-profit-box,
+.balance-help {
+  margin-top: 12px;
+}
+
+.daily-sheet-section h3 {
+  margin-bottom: 8px;
+  font-size: 14px;
+  letter-spacing: 0.07em;
+}
+
+.balance-help ul {
+  margin-top: 6px;
+}
+
+.balance-help li {
+  margin: 3px 0;
+  font-size: 13px;
+}
+
+.balance-chip-group {
+  gap: 8px;
+}
+
+.balance-filter-chip {
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.metric::after,
+.dashboard-kpi-card::before,
+.dashboard-mini-card::before {
+  opacity: 0.7;
+}
+
+.report-form,
+.auth-inline-form,
+.party-directory-form,
+.access-inline-form,
+.access-user-form,
+.retail-shortcut-form {
+  gap: 8px;
+}
+
+.upload-page,
+.access-control-page,
+.analytics-page,
+.daily-sheet-page,
+.ledger-page {
+  gap: 12px;
+}
+
+.upload-shell-section,
+.stock-rows,
+.search-card,
+.filter,
+.upload-box {
+  gap: 8px;
+}
+
+.upload-page .section,
+.access-control-page .section,
+.daily-sheet-card,
+.analytics-page .card,
+.ledger-page .card {
+  padding: 16px;
+}
+
+.upload-heading-block p,
+.access-list,
+.access-list small {
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.manual-entry-row,
+.actual-stock-row,
+.dealer-entry-row,
+.vendor-entry-row,
+.payment-entry-row,
+.mortality-entry-row,
+.opening-balance-entry-row,
+.opening-stock-entry-row,
+.process-day-grid-head {
+  gap: 8px;
+}
+
+.process-day-grid-head {
+  font-size: 9px;
+}
+
+.auth-shell {
+  padding-top: 20px;
+}
+
+.auth-card {
+  width: min(100%, 440px);
+}
+
+.compact-form-card,
+.access-list,
+.party-directory-table {
+  max-width: 100%;
+}
+
+.table-card table {
+  min-width: 0;
+}
+
+.table-card th,
+.table-card td {
+  padding-top: 7px;
+  padding-bottom: 7px;
+}
+
+.collapsible-section {
+  margin-bottom: 12px;
+}
+
+.collapsible-section > summary,
+.section-summary {
+  min-height: 38px;
+}
+
+.retailBillHistorySection,
+.paymentReceiptHistorySection {
+  margin-top: 10px;
+}
+
+@media (max-width: 1180px) {
+  .dashboard-kpi-grid,
+  .dashboard-kpi-grid-secondary,
+  .dashboard-mini-grid,
+  .kpi-grid,
+  .analytics-kpi-grid,
+  .daily-metric-strip,
+  .dashboard-detail-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .dashboard-kpi-grid,
+  .dashboard-kpi-grid-secondary,
+  .dashboard-mini-grid,
+  .kpi-grid,
+  .analytics-kpi-grid,
+  .daily-metric-strip,
+  .dashboard-detail-grid,
+  .chart-grid,
+  .report-form,
+  .auth-inline-form,
+  .party-directory-form,
+  .access-inline-form,
+  .access-user-form {
+    grid-template-columns: 1fr;
+  }
+
+  .main {
+    padding: 12px 10px 18px;
+  }
+
+  .card,
+  .section,
+  .upload-page .section,
+  .access-control-page .section {
+    padding: 14px;
+  }
+}
+
 .table-card {
   overflow-x: auto;
   padding: 0;
