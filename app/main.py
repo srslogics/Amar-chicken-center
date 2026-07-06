@@ -16,7 +16,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app import models
-from sqlalchemy import case, func, text, or_
+from sqlalchemy import case, func, text, or_, and_, exists, cast, String
 from decimal import Decimal
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,20 +27,165 @@ app = FastAPI()
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 FRONTEND_INDEX = FRONTEND_DIR / "index.html"
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+
+def current_shared_document_number(target_date, db: Session, outlet_id) -> str:
+    bill_numbers = db.query(models.RetailBill.bill_number).filter(
+        models.RetailBill.date == target_date,
+        models.RetailBill.outlet_id == outlet_id
+    ).all()
+    receipt_numbers = db.query(models.PaymentReceipt.receipt_number).filter(
+        models.PaymentReceipt.date == target_date,
+        models.PaymentReceipt.outlet_id == outlet_id
+    ).all()
+
+    max_number = 0
+    for row in list(bill_numbers) + list(receipt_numbers):
+        raw_value = getattr(row, "bill_number", None) or getattr(row, "receipt_number", None)
+        digits = "".join(char for char in str(raw_value or "") if char.isdigit())
+        if digits:
+            max_number = max(max_number, int(digits))
+
+    counter_row = db.query(models.DocumentNumberCounter).filter(
+        models.DocumentNumberCounter.target_date == target_date,
+        models.DocumentNumberCounter.outlet_id == outlet_id
+    ).first()
+    if counter_row and counter_row.next_number:
+        max_number = max(max_number, int(counter_row.next_number) - 1)
+
+    return str(max_number + 1)
+
+
+def reserve_shared_document_number(target_date, db: Session, outlet_id) -> str:
+    reserved_number = db.execute(
+        text("""
+            WITH current_max AS (
+                SELECT COALESCE(MAX(number_value), 0) AS max_number
+                FROM (
+                    SELECT CAST(regexp_replace(COALESCE(bill_number, ''), '[^0-9]', '', 'g') AS INTEGER) AS number_value
+                    FROM retail_bills
+                    WHERE date = :target_date
+                      AND outlet_id = :outlet_id
+                      AND COALESCE(regexp_replace(COALESCE(bill_number, ''), '[^0-9]', '', 'g'), '') <> ''
+                    UNION ALL
+                    SELECT CAST(regexp_replace(COALESCE(receipt_number, ''), '[^0-9]', '', 'g') AS INTEGER) AS number_value
+                    FROM payment_receipts
+                    WHERE date = :target_date
+                      AND outlet_id = :outlet_id
+                      AND COALESCE(regexp_replace(COALESCE(receipt_number, ''), '[^0-9]', '', 'g'), '') <> ''
+                ) existing_numbers
+            ),
+            reserved AS (
+                INSERT INTO document_number_counters (id, outlet_id, target_date, next_number)
+                VALUES (
+                    :id,
+                    :outlet_id,
+                    :target_date,
+                    (SELECT max_number + 2 FROM current_max)
+                )
+            ON CONFLICT (outlet_id, target_date)
+            DO UPDATE SET
+                next_number = GREATEST(
+                    document_number_counters.next_number,
+                    (SELECT max_number + 1 FROM current_max)
+                ) + 1,
+                updated_at = now()
+                RETURNING next_number - 1 AS reserved_number
+            )
+            SELECT reserved_number FROM reserved
+        """),
+        {
+            "id": str(uuid4()),
+            "outlet_id": str(outlet_id),
+            "target_date": target_date,
+        }
+    ).scalar_one()
+    return str(reserved_number)
 
 
 def ensure_database_schema():
     with engine.begin() as conn:
+        # Serialize boot-time schema work so parallel app instances don't deadlock
+        # while creating tables and adding columns on the same relations.
+        conn.execute(text("SELECT pg_advisory_xact_lock(4815162342)"))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS parties (
+                id UUID PRIMARY KEY,
+                name VARCHAR NOT NULL,
+                normalized_name VARCHAR,
+                type VARCHAR,
+                phone VARCHAR,
+                address VARCHAR,
+                created_at TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS outlets (
+                id UUID PRIMARY KEY,
+                name VARCHAR NOT NULL UNIQUE,
+                code VARCHAR UNIQUE,
+                is_active VARCHAR NOT NULL DEFAULT 'true',
+                created_at TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS party_aliases (
+                id UUID PRIMARY KEY,
+                alias VARCHAR,
+                normalized_alias VARCHAR,
+                party_id UUID REFERENCES parties(id)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS transactions (
+                id UUID PRIMARY KEY,
+                date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
+                party_id UUID REFERENCES parties(id),
+                type VARCHAR,
+                category VARCHAR,
+                item_type VARCHAR,
+                quantity NUMERIC,
+                weight NUMERIC,
+                rate NUMERIC,
+                amount NUMERIC,
+                payment_mode VARCHAR,
+                bill_number VARCHAR,
+                source_ref VARCHAR NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS uploaded_files (
+                id UUID PRIMARY KEY,
+                file_hash VARCHAR UNIQUE,
+                outlet_id UUID REFERENCES outlets(id),
+                file_type VARCHAR,
+                created_at TIMESTAMP DEFAULT now()
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS daily_stock (
+                id UUID PRIMARY KEY,
+                date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
+                opening_weight NUMERIC,
+                purchase_weight NUMERIC,
+                sales_weight NUMERIC,
+                expected_closing_weight NUMERIC,
+                actual_closing_weight NUMERIC,
+                leakage NUMERIC
+            )
+        """))
         conn.execute(text("ALTER TABLE parties ADD COLUMN IF NOT EXISTS phone VARCHAR"))
         conn.execute(text("ALTER TABLE parties ADD COLUMN IF NOT EXISTS address VARCHAR"))
+        conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS outlet_id UUID"))
         conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS item_type VARCHAR"))
         conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS source_ref VARCHAR NOT NULL DEFAULT ''"))
         conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS quantity NUMERIC"))
         conn.execute(text("ALTER TABLE transactions ADD COLUMN IF NOT EXISTS bill_number VARCHAR"))
         conn.execute(text("UPDATE transactions SET source_ref = '' WHERE source_ref IS NULL"))
         conn.execute(text("ALTER TABLE retail_bill_items ADD COLUMN IF NOT EXISTS line_type VARCHAR NOT NULL DEFAULT 'STANDARD'"))
+        conn.execute(text("ALTER TABLE retail_bill_items ADD COLUMN IF NOT EXISTS source_item_type VARCHAR"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS users (
                 id UUID PRIMARY KEY,
@@ -53,6 +198,15 @@ def ensure_database_schema():
             )
         """))
         conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS user_outlet_access (
+                id UUID PRIMARY KEY,
+                user_id UUID NOT NULL REFERENCES users(id),
+                outlet_id UUID NOT NULL REFERENCES outlets(id),
+                created_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT unique_user_outlet_access UNIQUE (user_id, outlet_id)
+            )
+        """))
+        conn.execute(text("""
             CREATE TABLE IF NOT EXISTS user_sessions (
                 id UUID PRIMARY KEY,
                 user_id UUID NOT NULL REFERENCES users(id),
@@ -61,8 +215,37 @@ def ensure_database_schema():
                 created_at TIMESTAMP DEFAULT now()
             )
         """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS document_number_counters (
+                id UUID PRIMARY KEY,
+                outlet_id UUID NOT NULL REFERENCES outlets(id),
+                target_date DATE NOT NULL,
+                next_number INTEGER NOT NULL DEFAULT 1,
+                created_at TIMESTAMP DEFAULT now(),
+                updated_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT unique_document_counter_per_day UNIQUE (outlet_id, target_date)
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS retail_shortcuts (
+                id UUID PRIMARY KEY,
+                outlet_id UUID NOT NULL REFERENCES outlets(id),
+                name VARCHAR NOT NULL,
+                normalized_name VARCHAR NOT NULL,
+                line_type VARCHAR NOT NULL DEFAULT 'STANDARD',
+                source_item_type VARCHAR,
+                unit VARCHAR NOT NULL DEFAULT 'KGS',
+                rate NUMERIC,
+                created_at TIMESTAMP DEFAULT now(),
+                updated_at TIMESTAMP DEFAULT now(),
+                CONSTRAINT unique_retail_shortcut_per_outlet UNIQUE (outlet_id, normalized_name, line_type)
+            )
+        """))
+        conn.execute(text("ALTER TABLE retail_shortcuts ADD COLUMN IF NOT EXISTS source_item_type VARCHAR"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions (token)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_document_number_counters_outlet_date ON document_number_counters (outlet_id, target_date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_retail_shortcuts_outlet_line_type ON retail_shortcuts (outlet_id, line_type)"))
         conn.execute(text("ALTER TABLE transactions DROP CONSTRAINT IF EXISTS unique_txn"))
         conn.execute(text("""
             DO $$
@@ -73,7 +256,7 @@ def ensure_database_schema():
                     WHERE conname = 'unique_txn'
                 ) THEN
                     ALTER TABLE transactions
-                    ADD CONSTRAINT unique_txn UNIQUE (date, party_id, weight, rate, type, category, item_type, bill_number, source_ref);
+                    ADD CONSTRAINT unique_txn UNIQUE (date, outlet_id, party_id, weight, rate, type, category, item_type, bill_number, source_ref);
                 END IF;
             END
             $$;
@@ -81,27 +264,33 @@ def ensure_database_schema():
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_transactions_date_type ON transactions (date, type)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_transactions_party_date ON transactions (party_id, date)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_transactions_item_date ON transactions (item_type, date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_transactions_outlet_date ON transactions (outlet_id, date)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_party_alias_normalized ON party_aliases (normalized_alias)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_daily_stock_date ON daily_stock (date)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_retail_bills_date ON retail_bills (date)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_retail_bill_items_bill_id ON retail_bill_items (bill_id)"))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_payment_receipts_date ON payment_receipts (date)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_outlet_access_user ON user_outlet_access (user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS idx_user_outlet_access_outlet ON user_outlet_access (outlet_id)"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS item_opening_stock (
                 id UUID PRIMARY KEY,
                 date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
                 item_type VARCHAR NOT NULL,
                 opening_quantity NUMERIC,
                 opening_weight NUMERIC,
                 created_at TIMESTAMP DEFAULT now(),
-                CONSTRAINT unique_item_opening_stock UNIQUE (date, item_type)
+                CONSTRAINT unique_item_opening_stock UNIQUE (date, outlet_id, item_type)
             )
         """))
+        conn.execute(text("ALTER TABLE item_opening_stock ADD COLUMN IF NOT EXISTS outlet_id UUID"))
         conn.execute(text("ALTER TABLE item_opening_stock ADD COLUMN IF NOT EXISTS opening_quantity NUMERIC"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS daily_item_stock (
                 id UUID PRIMARY KEY,
                 date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
                 item_type VARCHAR NOT NULL,
                 opening_quantity NUMERIC,
                 opening_weight NUMERIC,
@@ -116,9 +305,10 @@ def ensure_database_schema():
                 quantity_leakage NUMERIC,
                 leakage NUMERIC,
                 created_at TIMESTAMP DEFAULT now(),
-                CONSTRAINT unique_daily_item_stock UNIQUE (date, item_type)
+                CONSTRAINT unique_daily_item_stock UNIQUE (date, outlet_id, item_type)
             )
         """))
+        conn.execute(text("ALTER TABLE daily_item_stock ADD COLUMN IF NOT EXISTS outlet_id UUID"))
         conn.execute(text("ALTER TABLE daily_item_stock ADD COLUMN IF NOT EXISTS opening_quantity NUMERIC"))
         conn.execute(text("ALTER TABLE daily_item_stock ADD COLUMN IF NOT EXISTS purchase_quantity NUMERIC"))
         conn.execute(text("ALTER TABLE daily_item_stock ADD COLUMN IF NOT EXISTS sales_quantity NUMERIC"))
@@ -130,12 +320,14 @@ def ensure_database_schema():
                 id UUID PRIMARY KEY,
                 bill_number VARCHAR NOT NULL,
                 date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
                 party_id UUID REFERENCES parties(id),
                 customer_name VARCHAR,
                 customer_phone VARCHAR,
                 customer_address VARCHAR,
                 cashier_name VARCHAR,
                 payment_mode VARCHAR,
+                payment_breakdown TEXT,
                 total_quantity NUMERIC,
                 total_weight NUMERIC,
                 ice_amount NUMERIC,
@@ -144,9 +336,10 @@ def ensure_database_schema():
                 outstanding_amount NUMERIC,
                 notes VARCHAR,
                 created_at TIMESTAMP DEFAULT now(),
-                CONSTRAINT unique_retail_bill_number_per_day UNIQUE (date, bill_number)
+                CONSTRAINT unique_retail_bill_number_per_day UNIQUE (date, outlet_id, bill_number)
             )
         """))
+        conn.execute(text("ALTER TABLE retail_bills ADD COLUMN IF NOT EXISTS outlet_id UUID"))
         conn.execute(text("ALTER TABLE retail_bills ADD COLUMN IF NOT EXISTS ice_amount NUMERIC"))
         conn.execute(text("ALTER TABLE retail_bills ADD COLUMN IF NOT EXISTS payment_breakdown TEXT"))
         conn.execute(text("""
@@ -168,6 +361,7 @@ def ensure_database_schema():
             CREATE TABLE IF NOT EXISTS dressed_stock_entries (
                 id UUID PRIMARY KEY,
                 date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
                 item_name VARCHAR NOT NULL,
                 live_quantity NUMERIC,
                 live_weight NUMERIC,
@@ -178,11 +372,13 @@ def ensure_database_schema():
                 created_at TIMESTAMP DEFAULT now()
             )
         """))
+        conn.execute(text("ALTER TABLE dressed_stock_entries ADD COLUMN IF NOT EXISTS outlet_id UUID"))
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS payment_receipts (
                 id UUID PRIMARY KEY,
                 receipt_number VARCHAR NOT NULL,
                 date DATE NOT NULL,
+                outlet_id UUID REFERENCES outlets(id),
                 party_id UUID REFERENCES parties(id),
                 party_name VARCHAR,
                 party_phone VARCHAR,
@@ -193,13 +389,64 @@ def ensure_database_schema():
                 amount NUMERIC,
                 notes VARCHAR,
                 created_at TIMESTAMP DEFAULT now(),
-                CONSTRAINT unique_payment_receipt_number_per_day UNIQUE (date, receipt_number)
+                CONSTRAINT unique_payment_receipt_number_per_day UNIQUE (date, outlet_id, receipt_number)
             )
         """))
+        conn.execute(text("ALTER TABLE payment_receipts ADD COLUMN IF NOT EXISTS outlet_id UUID"))
+        conn.execute(text("ALTER TABLE uploaded_files ADD COLUMN IF NOT EXISTS outlet_id UUID"))
+        conn.execute(text("ALTER TABLE daily_stock ADD COLUMN IF NOT EXISTS outlet_id UUID"))
+        conn.execute(text("ALTER TABLE daily_stock DROP CONSTRAINT IF EXISTS daily_stock_date_key"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_stock_outlet_date_unique ON daily_stock (outlet_id, date)"))
+        conn.execute(text("ALTER TABLE retail_bills DROP CONSTRAINT IF EXISTS unique_retail_bill_number_per_day"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_retail_bill_number_per_day_outlet ON retail_bills (date, outlet_id, bill_number)"))
+        conn.execute(text("ALTER TABLE payment_receipts DROP CONSTRAINT IF EXISTS unique_payment_receipt_number_per_day"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_payment_receipt_number_per_day_outlet ON payment_receipts (date, outlet_id, receipt_number)"))
+        conn.execute(text("ALTER TABLE item_opening_stock DROP CONSTRAINT IF EXISTS unique_item_opening_stock"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_item_opening_stock_outlet_date_type ON item_opening_stock (date, outlet_id, item_type)"))
+        conn.execute(text("ALTER TABLE daily_item_stock DROP CONSTRAINT IF EXISTS unique_daily_item_stock"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_item_stock_outlet_date_type ON daily_item_stock (date, outlet_id, item_type)"))
 
+        default_outlet = conn.execute(text("SELECT id FROM outlets ORDER BY created_at ASC LIMIT 1")).scalar()
+        if not default_outlet:
+            default_outlet = str(uuid4())
+            conn.execute(
+                text("INSERT INTO outlets (id, name, code, is_active) VALUES (:id, :name, :code, 'true')"),
+                {"id": default_outlet, "name": "Main Outlet", "code": "MAIN"}
+            )
 
-ensure_database_schema()
+        conn.execute(text("UPDATE transactions SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE uploaded_files SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE item_opening_stock SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE daily_stock SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE daily_item_stock SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE retail_bills SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE dressed_stock_entries SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
+        conn.execute(text("UPDATE payment_receipts SET outlet_id = :outlet_id WHERE outlet_id IS NULL"), {"outlet_id": default_outlet})
 
+def ensure_outlet_access_defaults():
+    db = SessionLocal()
+    try:
+        default_outlet = get_default_outlet(db)
+        all_outlets = db.query(models.Outlet).filter(
+            func.lower(models.Outlet.is_active) == "true"
+        ).all()
+        users = db.query(models.User).all()
+        for user in users:
+            role = (user.role or ROLE_STAFF).upper()
+            existing_ids = {
+                str(row.outlet_id)
+                for row in db.query(models.UserOutletAccess).filter(
+                    models.UserOutletAccess.user_id == user.id
+                ).all()
+            }
+            required_outlets = all_outlets if role == ROLE_OWNER else [default_outlet]
+            for outlet in required_outlets:
+                if str(outlet.id) in existing_ids:
+                    continue
+                db.add(models.UserOutletAccess(id=uuid4(), user_id=user.id, outlet_id=outlet.id))
+        db.commit()
+    finally:
+        db.close()
 def get_db():
     db = SessionLocal()
     try:
@@ -211,6 +458,7 @@ def get_db():
 SESSION_DAYS = 14
 ROLE_OWNER = "OWNER"
 ROLE_STAFF = "STAFF"
+ALL_OUTLETS_TOKEN = "ALL"
 
 
 def hash_password(password: str) -> str:
@@ -228,12 +476,57 @@ def verify_password(password: str, password_hash: str) -> bool:
     return hmac.compare_digest(derived, stored)
 
 
-def serialize_user(user: models.User):
+def serialize_outlet(outlet: models.Outlet):
+    return {
+        "id": str(outlet.id),
+        "name": outlet.name,
+        "code": outlet.code or ""
+    }
+
+
+def get_user_accessible_outlets(db: Session, user: models.User):
+    role = (user.role or ROLE_STAFF).upper()
+    if role == ROLE_OWNER:
+        return db.query(models.Outlet).filter(
+            func.lower(models.Outlet.is_active) == "true"
+        ).order_by(models.Outlet.name.asc()).all()
+
+    outlet_ids = [
+        row.outlet_id
+        for row in db.query(models.UserOutletAccess).filter(
+            models.UserOutletAccess.user_id == user.id
+        ).all()
+    ]
+    if not outlet_ids:
+        return []
+    return db.query(models.Outlet).filter(
+        models.Outlet.id.in_(outlet_ids),
+        func.lower(models.Outlet.is_active) == "true"
+    ).order_by(models.Outlet.name.asc()).all()
+
+
+def get_default_outlet(db: Session):
+    outlet = db.query(models.Outlet).order_by(models.Outlet.created_at.asc()).first()
+    if outlet:
+        return outlet
+    outlet = models.Outlet(id=uuid4(), name="Main Outlet", code="MAIN", is_active="true")
+    db.add(outlet)
+    db.commit()
+    db.refresh(outlet)
+    return outlet
+
+
+def serialize_user(user: models.User, db: Session | None = None):
+    outlets = []
+    if db is not None:
+        outlets = [serialize_outlet(outlet) for outlet in get_user_accessible_outlets(db, user)]
     return {
         "id": str(user.id),
         "username": user.username,
         "role": (user.role or ROLE_STAFF).upper(),
-        "display_name": user.display_name or user.username
+        "display_name": user.display_name or user.username,
+        "outlets": outlets,
+        "can_view_all_outlets": (user.role or ROLE_STAFF).upper() == ROLE_OWNER
     }
 
 
@@ -283,6 +576,68 @@ def require_owner(user: models.User = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Owner access required")
     return user
 
+
+def get_outlet_scope(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+    x_outlet_id: str | None = Header(default=None, alias="X-Outlet-Id")
+):
+    accessible_outlets = get_user_accessible_outlets(db, user)
+    if not accessible_outlets:
+        raise HTTPException(status_code=403, detail="No outlet access assigned")
+
+    role = (user.role or ROLE_STAFF).upper()
+    requested = str(x_outlet_id or "").strip()
+
+    if role == ROLE_OWNER and requested.upper() == ALL_OUTLETS_TOKEN:
+        return {"mode": "all", "outlets": accessible_outlets, "selected": None}
+
+    if requested:
+        for outlet in accessible_outlets:
+            if str(outlet.id) == requested:
+                return {"mode": "single", "outlets": accessible_outlets, "selected": outlet}
+        raise HTTPException(status_code=403, detail="Outlet access denied")
+
+    return {"mode": "single", "outlets": accessible_outlets, "selected": accessible_outlets[0]}
+
+
+def get_current_outlet(scope=Depends(get_outlet_scope)):
+    outlet = scope.get("selected")
+    if not outlet:
+        raise HTTPException(status_code=400, detail="Select one outlet for this action")
+    return outlet
+
+
+def resolve_scope_outlet_id(scope):
+    selected = scope.get("selected")
+    if selected:
+        return selected.id
+    outlet = scope.get("outlet")
+    if outlet:
+        return outlet.id
+    outlet_id = scope.get("outlet_id")
+    if outlet_id:
+        return outlet_id
+    raise KeyError("selected")
+
+
+def apply_outlet_scope(query, model, scope):
+    if scope["mode"] == "all":
+        outlet_ids = [outlet.id for outlet in scope["outlets"]]
+        return query.filter(model.outlet_id.in_(outlet_ids))
+    return query.filter(model.outlet_id == resolve_scope_outlet_id(scope))
+
+
+def outlet_scope_filter(model, scope):
+    if scope["mode"] == "all":
+        outlet_ids = [outlet.id for outlet in scope["outlets"]]
+        return model.outlet_id.in_(outlet_ids)
+    return model.outlet_id == resolve_scope_outlet_id(scope)
+
+
+ensure_database_schema()
+ensure_outlet_access_defaults()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # for now
@@ -299,15 +654,7 @@ PUBLIC_PATH_PREFIXES = (
     "/js/",
     "/assets/",
 )
-PUBLIC_PATHS = {"/", "/favicon.ico", "/health.html"}
-
-
-def cors_json_error(status_code: int, message: str):
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": message},
-        headers={"Access-Control-Allow-Origin": "*"}
-    )
+PUBLIC_PATHS = {"/", "/favicon.ico", "/health.html", "/manifest.webmanifest", "/sw.js"}
 
 
 @app.middleware("http")
@@ -323,10 +670,10 @@ async def auth_middleware(request, call_next):
     try:
         session = get_active_session(db, token)
         if not session:
-            return cors_json_error(401, "Authentication required")
+            return JSONResponse(status_code=401, content={"error": "Authentication required"})
         user = db.query(models.User).filter(models.User.id == session.user_id).first()
         if not user or str(user.is_active or "true").lower() != "true":
-            return cors_json_error(401, "Authentication required")
+            return JSONResponse(status_code=401, content={"error": "Authentication required"})
     finally:
         db.close()
 
@@ -378,9 +725,11 @@ def auth_setup_owner(payload: dict = Body(...), db: Session = Depends(get_db)):
     )
     db.add(user)
     db.flush()
+    default_outlet = get_default_outlet(db)
+    db.add(models.UserOutletAccess(id=uuid4(), user_id=user.id, outlet_id=default_outlet.id))
     session = create_user_session(db, user)
     db.commit()
-    return {"user": serialize_user(user), "token": session.token}
+    return {"user": serialize_user(user, db), "token": session.token}
 
 
 @app.post("/auth/login")
@@ -395,12 +744,12 @@ def auth_login(payload: dict = Body(...), db: Session = Depends(get_db)):
 
     session = create_user_session(db, user)
     db.commit()
-    return {"user": serialize_user(user), "token": session.token}
+    return {"user": serialize_user(user, db), "token": session.token}
 
 
 @app.get("/auth/me")
-def auth_me(user: models.User = Depends(get_current_user)):
-    return {"user": serialize_user(user)}
+def auth_me(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    return {"user": serialize_user(user, db)}
 
 
 @app.post("/auth/logout")
@@ -419,7 +768,7 @@ def auth_logout(
 @app.get("/auth/users")
 def auth_list_users(db: Session = Depends(get_db), user: models.User = Depends(require_owner)):
     users = db.query(models.User).order_by(models.User.username.asc()).all()
-    return {"results": [serialize_user(item) for item in users]}
+    return {"results": [serialize_user(item, db) for item in users]}
 
 
 @app.post("/auth/users")
@@ -428,6 +777,7 @@ def auth_create_user(payload: dict = Body(...), db: Session = Depends(get_db), u
     password = str(payload.get("password") or "")
     display_name = str(payload.get("display_name") or username).strip()
     role = str(payload.get("role") or ROLE_STAFF).strip().upper()
+    outlet_ids = payload.get("outlet_ids") or []
 
     if len(username) < 3:
         return {"error": "Username must be at least 3 characters"}
@@ -448,9 +798,192 @@ def auth_create_user(payload: dict = Body(...), db: Session = Depends(get_db), u
         is_active="true"
     )
     db.add(new_user)
+    db.flush()
+
+    accessible_outlets = db.query(models.Outlet).filter(
+        func.lower(models.Outlet.is_active) == "true"
+    ).order_by(models.Outlet.name.asc()).all()
+
+    if role == ROLE_OWNER:
+        assigned = accessible_outlets
+    else:
+        if outlet_ids:
+            assigned = [outlet for outlet in accessible_outlets if str(outlet.id) in set(str(v) for v in outlet_ids)]
+        else:
+            default_outlet = get_default_outlet(db)
+            assigned = [default_outlet]
+
+    for outlet in assigned:
+        db.add(models.UserOutletAccess(id=uuid4(), user_id=new_user.id, outlet_id=outlet.id))
+
     db.commit()
     db.refresh(new_user)
-    return {"user": serialize_user(new_user)}
+    return {"user": serialize_user(new_user, db)}
+
+
+@app.get("/outlets")
+def list_outlets(db: Session = Depends(get_db), user: models.User = Depends(get_current_user)):
+    outlets = get_user_accessible_outlets(db, user)
+    return {
+        "results": [serialize_outlet(outlet) for outlet in outlets],
+        "can_view_all": (user.role or ROLE_STAFF).upper() == ROLE_OWNER
+    }
+
+
+@app.get("/retail-shortcuts")
+def list_retail_shortcuts(
+    db: Session = Depends(get_db),
+    current_outlet: models.Outlet = Depends(get_current_outlet)
+):
+    rows = db.query(models.RetailShortcut).filter(
+        models.RetailShortcut.outlet_id == current_outlet.id
+    ).order_by(
+        models.RetailShortcut.line_type.asc(),
+        models.RetailShortcut.name.asc()
+    ).all()
+
+    return {
+        "results": [
+            {
+                "id": str(row.id),
+                "name": row.name or "",
+                "rate": float(row.rate or 0),
+                "line_type": row.line_type or "STANDARD",
+                "source_item_type": row.source_item_type or "",
+                "unit": row.unit or "KGS"
+            }
+            for row in rows
+        ]
+    }
+
+
+@app.post("/retail-shortcuts")
+def save_retail_shortcut(
+    payload: dict = Body(...),
+    db: Session = Depends(get_db),
+    current_outlet: models.Outlet = Depends(get_current_outlet)
+):
+    shortcut_id_raw = str(payload.get("id") or "").strip()
+    name = str(payload.get("name") or "").strip()
+    line_type = str(payload.get("line_type") or "STANDARD").strip().upper() or "STANDARD"
+    source_item_type = resolve_stock_source_type(name, payload.get("source_item_type") or "")
+    unit = "KGS" if line_type == "DRESSED" else (str(payload.get("unit") or "KGS").strip().upper() or "KGS")
+    rate = Decimal(str(payload.get("rate") or 0))
+
+    if not name:
+        return {"error": "Enter shortcut item name"}
+
+    if line_type not in ["STANDARD", "DRESSED"]:
+        return {"error": "Invalid shortcut type"}
+
+    normalized_name = normalize_party_name(name)
+    shortcut = None
+    if shortcut_id_raw:
+        try:
+            shortcut = db.query(models.RetailShortcut).filter(
+                models.RetailShortcut.id == UUID(shortcut_id_raw),
+                models.RetailShortcut.outlet_id == current_outlet.id
+            ).first()
+        except ValueError:
+            shortcut = None
+
+    duplicate_query = db.query(models.RetailShortcut).filter(
+        models.RetailShortcut.outlet_id == current_outlet.id,
+        models.RetailShortcut.normalized_name == normalized_name,
+        models.RetailShortcut.line_type == line_type
+    )
+    if shortcut:
+        duplicate_query = duplicate_query.filter(models.RetailShortcut.id != shortcut.id)
+
+    if duplicate_query.first():
+        return {"error": "Shortcut already exists"}
+
+    if shortcut is None:
+        shortcut = models.RetailShortcut(
+            outlet_id=current_outlet.id,
+            name=name,
+            normalized_name=normalized_name,
+            line_type=line_type,
+            source_item_type=source_item_type or None,
+            unit=unit,
+            rate=rate
+        )
+        db.add(shortcut)
+    else:
+        shortcut.name = name
+        shortcut.normalized_name = normalized_name
+        shortcut.line_type = line_type
+        shortcut.source_item_type = source_item_type or None
+        shortcut.unit = unit
+        shortcut.rate = rate
+
+    try:
+        db.commit()
+        db.refresh(shortcut)
+    except Exception as e:
+        db.rollback()
+        return {"error": "Saving shortcut failed", "details": str(e)}
+
+    return {
+        "status": "success",
+        "shortcut": {
+            "id": str(shortcut.id),
+            "name": shortcut.name or "",
+            "rate": float(shortcut.rate or 0),
+            "line_type": shortcut.line_type or "STANDARD",
+            "source_item_type": shortcut.source_item_type or "",
+            "unit": shortcut.unit or "KGS"
+        }
+    }
+
+
+@app.delete("/retail-shortcuts/{shortcut_id}")
+def delete_retail_shortcut(
+    shortcut_id: UUID,
+    db: Session = Depends(get_db),
+    current_outlet: models.Outlet = Depends(get_current_outlet)
+):
+    shortcut = db.query(models.RetailShortcut).filter(
+        models.RetailShortcut.id == shortcut_id,
+        models.RetailShortcut.outlet_id == current_outlet.id
+    ).first()
+    if not shortcut:
+        return {"error": "Shortcut not found"}
+
+    try:
+        db.delete(shortcut)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        return {"error": "Deleting shortcut failed", "details": str(e)}
+
+    return {"status": "success"}
+
+
+@app.post("/outlets")
+def create_outlet(payload: dict = Body(...), db: Session = Depends(get_db), user: models.User = Depends(require_owner)):
+    name = str(payload.get("name") or "").strip()
+    code = str(payload.get("code") or "").strip() or None
+    if len(name) < 2:
+        return {"error": "Outlet name must be at least 2 characters"}
+
+    existing = db.query(models.Outlet).filter(func.lower(models.Outlet.name) == name.lower()).first()
+    if existing:
+        return {"error": "Outlet already exists"}
+
+    outlet = models.Outlet(id=uuid4(), name=name, code=code, is_active="true")
+    db.add(outlet)
+    db.flush()
+
+    owners = db.query(models.User).filter(
+        func.upper(func.coalesce(models.User.role, ROLE_STAFF)) == ROLE_OWNER
+    ).all()
+    for owner in owners:
+        db.add(models.UserOutletAccess(id=uuid4(), user_id=owner.id, outlet_id=outlet.id))
+
+    db.commit()
+    db.refresh(outlet)
+    return {"outlet": serialize_outlet(outlet)}
 
 
 TEMPLATES = {
@@ -486,9 +1019,41 @@ def parse_input_date(value: str):
         return None
 
 
-def summarize_ledger_transactions(txns):
+def settled_retail_bill_keys(db: Session, txns):
+    if not txns:
+        return set()
+
+    retail_keys = {
+        (txn.date, txn.party_id, str(txn.bill_number or "").strip())
+        for txn in txns
+        if txn.party_id
+        and str(txn.bill_number or "").strip()
+        and txn.type == "SALE"
+        and (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"]
+    }
+
+    if not retail_keys:
+        return set()
+
+    retail_dates = {key[0] for key in retail_keys}
+    retail_parties = {key[1] for key in retail_keys}
+    retail_bill_numbers = {key[2] for key in retail_keys}
+
+    return {
+        (bill.date, bill.party_id, str(bill.bill_number or "").strip())
+        for bill in db.query(models.RetailBill).filter(
+            models.RetailBill.party_id.in_(list(retail_parties)),
+            models.RetailBill.date.in_(list(retail_dates)),
+            models.RetailBill.bill_number.in_(list(retail_bill_numbers)),
+            models.RetailBill.outstanding_amount <= 0
+        ).all()
+    }
+
+
+def summarize_ledger_transactions(txns, settled_keys=None):
     summarized = []
     index = 0
+    settled_keys = settled_keys or set()
 
     while index < len(txns):
         txn = txns[index]
@@ -510,6 +1075,8 @@ def summarize_ledger_transactions(txns):
             total_amount = sum(Decimal(g.amount or 0) for g in grouped)
             total_weight = sum(Decimal(g.weight or 0) for g in grouped)
             total_quantity = sum(Decimal(g.quantity or 0) for g in grouped)
+            bill_key = (first.date, first.party_id, str(first.bill_number or "").strip())
+            delta = Decimal("0") if bill_key in settled_keys else total_amount
 
             summarized.append({
                 "date": first.date,
@@ -519,7 +1086,7 @@ def summarize_ledger_transactions(txns):
                 "payment_mode": first.payment_mode or "NA",
                 "bill_number": first.bill_number or "",
                 "amount": total_amount,
-                "delta": total_amount,
+                "delta": delta,
                 "weight": total_weight,
                 "quantity": total_quantity
             })
@@ -527,6 +1094,13 @@ def summarize_ledger_transactions(txns):
 
         amount = Decimal(txn.amount or 0)
         delta = ledger_delta(txn)
+        bill_key = (txn.date, txn.party_id, str(txn.bill_number or "").strip())
+        if (
+            txn.type == "SALE"
+            and (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"]
+            and bill_key in settled_keys
+        ):
+            delta = Decimal("0")
 
         txn_type = txn.type
         if txn.type == "PAYMENT" and txn.category:
@@ -552,11 +1126,12 @@ def summarize_ledger_transactions(txns):
     return summarized
 
 
-def build_ledger(txns):
+def build_ledger(db: Session, txns):
     balance = Decimal("0")
     ledger = []
+    settled_keys = settled_retail_bill_keys(db, txns)
 
-    for txn in summarize_ledger_transactions(txns):
+    for txn in summarize_ledger_transactions(txns, settled_keys):
         amount = Decimal(txn["amount"] or 0)
         delta = Decimal(txn["delta"] or 0)
         balance += delta
@@ -579,18 +1154,27 @@ def build_ledger(txns):
     return balance, ledger
 
 
-def build_party_summary(txns, balance):
+def build_party_summary(db: Session, txns, balance):
     last_txn = txns[-1] if txns else None
     last_date = last_txn.date if last_txn else None
     opening_balance = Decimal("0")
     day_txns = []
+    settled_keys = settled_retail_bill_keys(db, txns)
 
     if last_date:
         for txn in txns:
             if txn.date >= last_date:
                 day_txns.append(txn)
             else:
-                opening_balance += ledger_delta(txn)
+                delta = ledger_delta(txn)
+                bill_key = (txn.date, txn.party_id, str(txn.bill_number or "").strip())
+                if (
+                    txn.type == "SALE"
+                    and (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"]
+                    and bill_key in settled_keys
+                ):
+                    delta = Decimal("0")
+                opening_balance += delta
 
     total_sales = sum(Decimal(t.amount or 0) for t in day_txns if t.type == "SALE")
     total_purchase = sum(Decimal(t.amount or 0) for t in day_txns if t.type == "PURCHASE")
@@ -620,8 +1204,17 @@ def ledger_delta(txn):
     return Decimal("0")
 
 
-def receivable_delta(txn):
+def receivable_delta(txn, settled_keys=None):
     amount = Decimal(txn.amount or 0)
+    settled_keys = settled_keys or set()
+
+    bill_key = (txn.date, txn.party_id, str(txn.bill_number or "").strip())
+    if (
+        txn.type == "SALE"
+        and (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"]
+        and bill_key in settled_keys
+    ):
+        return Decimal("0")
 
     if txn.type == "SALE" or (txn.type == "OPENING" and txn.category == "RECEIVABLE"):
         return amount
@@ -644,9 +1237,79 @@ def payable_delta(txn):
     return Decimal("0")
 
 
+def build_balance_sheet_rows_from_ledger(
+    db: Session,
+    grouped_parties: dict,
+    target_date,
+    include_txn,
+    running_delta,
+    day_purchase_amount,
+    day_payment_amount,
+    opening_belongs_to_old
+):
+    result_rows = []
+    total_old = Decimal("0")
+    total_purchases = Decimal("0")
+    total_payment = Decimal("0")
+    total_balance = Decimal("0")
+
+    for party_data in grouped_parties.values():
+        txns = [txn for txn in party_data["txns"] if include_txn(txn)]
+        if not txns:
+            continue
+
+        settled_keys = settled_retail_bill_keys(db, txns)
+        old_balance = Decimal("0")
+        purchases = Decimal("0")
+        payment = Decimal("0")
+
+        for txn in txns:
+            if opening_belongs_to_old(txn, target_date):
+                old_balance += running_delta(txn, settled_keys)
+                continue
+
+            if txn.date < target_date:
+                old_balance += running_delta(txn, settled_keys)
+                continue
+
+            purchases += day_purchase_amount(txn, target_date, settled_keys)
+            payment += day_payment_amount(txn, target_date, settled_keys)
+
+        balance = old_balance + purchases - payment
+
+        if old_balance == 0 and purchases == 0 and payment == 0 and balance == 0:
+            continue
+
+        result_rows.append(format_balance_row(party_data["party_name"], old_balance, purchases, payment, balance))
+        total_old += old_balance
+        total_purchases += purchases
+        total_payment += payment
+        total_balance += balance
+
+    return {
+        "rows": result_rows,
+        "totals": format_balance_row("TOTAL", total_old, total_purchases, total_payment, total_balance)
+    }
+
+
 def receivable_case():
     return case(
-        (models.Transaction.type == "SALE", models.Transaction.amount),
+        (
+            (models.Transaction.type == "SALE") &
+            ~(
+                models.Transaction.source_ref.like("retail-bill:%") &
+                models.Transaction.party_id.isnot(None) &
+                exists().where(
+                    and_(
+                        models.RetailBill.party_id == models.Transaction.party_id,
+                        models.RetailBill.date == models.Transaction.date,
+                        cast(models.RetailBill.bill_number, String) == cast(models.Transaction.bill_number, String),
+                        models.RetailBill.outstanding_amount <= 0
+                    )
+                )
+            ),
+            models.Transaction.amount
+        ),
         (
             (models.Transaction.type == "OPENING") & (models.Transaction.category == "RECEIVABLE"),
             models.Transaction.amount
@@ -797,8 +1460,135 @@ def safe_filename(value):
     return quote(cleaned[:120] or "report")
 
 
-def latest_item_rates(db: Session, target_date):
-    rows = db.query(
+def append_daily_sheet_goods_rows(export_rows, section_name, section):
+    if not section:
+        return
+    for row in section.get("rows", []) or []:
+        export_rows.append({
+            "Section": section_name,
+            "Label": "Row",
+            "Name": row.get("goods", ""),
+            "Nag": row.get("nag", ""),
+            "Weight": row.get("weight", ""),
+            "Rate": row.get("rate", ""),
+            "Total": row.get("total", ""),
+            "Mode": "",
+            "Paid": "",
+            "Outstanding": ""
+        })
+    total = section.get("total")
+    if total:
+        export_rows.append({
+            "Section": section_name,
+            "Label": "Total",
+            "Name": total.get("goods", "TOTAL"),
+            "Nag": total.get("nag", ""),
+            "Weight": total.get("weight", ""),
+            "Rate": total.get("rate", ""),
+            "Total": total.get("total", ""),
+            "Mode": "",
+            "Paid": "",
+            "Outstanding": ""
+        })
+
+
+def build_daily_sheet_export_report(sheet_payload, sheet_type, target_date):
+    if sheet_type in ["vendor", "dealer"]:
+        rows = [
+            {
+                "Party Name": row.get("party_name", ""),
+                "Old Bal": row.get("old_balance", 0),
+                "Purchases": row.get("purchases", 0),
+                "Payment": row.get("payment", 0),
+                "Balance": row.get("balance", 0)
+            }
+            for row in (sheet_payload.get("rows") or [])
+        ]
+        totals = sheet_payload.get("totals") or {}
+        if totals:
+            rows.append({
+                "Party Name": totals.get("party_name", "TOTAL"),
+                "Old Bal": totals.get("old_balance", 0),
+                "Purchases": totals.get("purchases", 0),
+                "Payment": totals.get("payment", 0),
+                "Balance": totals.get("balance", 0)
+            })
+
+        columns = ["Party Name", "Old Bal", "Purchases", "Payment", "Balance"]
+        filename = safe_filename(f"{sheet_type}_balance_sheet_{target_date}")
+        title = sheet_payload.get("title") or f"{sheet_type.title()} Balance Sheet"
+        return report_response(rows, columns, filename, "excel", title)
+
+    rows = []
+    append_daily_sheet_goods_rows(rows, "Opening Stock", sheet_payload.get("opening_stock") or {})
+    append_daily_sheet_goods_rows(rows, "Purchase Stock", sheet_payload.get("purchase_stock") or {})
+    append_daily_sheet_goods_rows(rows, "Transportation Mortality", sheet_payload.get("transport_mortality_stock") or {})
+    append_daily_sheet_goods_rows(rows, "Shop Mortality", sheet_payload.get("shop_mortality_stock") or {})
+    for section in sheet_payload.get("sales_sections") or []:
+        append_daily_sheet_goods_rows(rows, section.get("title", "Sales"), section)
+
+    final_stock = sheet_payload.get("final_stock") or {}
+    for key in [
+        "total_purchases",
+        "transport_mortality",
+        "shop_mortality",
+        "sales",
+        "closing_stock",
+        "actual_stock",
+        "short_by"
+    ]:
+        row = final_stock.get(key)
+        if row:
+            rows.append({
+                "Section": "Final Stock",
+                "Label": "Summary",
+                "Name": row.get("goods", ""),
+                "Nag": row.get("nag", ""),
+                "Weight": row.get("weight", ""),
+                "Rate": row.get("rate", ""),
+                "Total": row.get("total", ""),
+                "Mode": "",
+                "Paid": "",
+                "Outstanding": ""
+            })
+
+    retail_credit = sheet_payload.get("retail_credit_sheet") or {}
+    for row in retail_credit.get("rows", []) or []:
+        rows.append({
+            "Section": "Retail Credit",
+            "Label": "Row",
+            "Name": row.get("customer_name", ""),
+            "Nag": row.get("bill_number", ""),
+            "Weight": row.get("total_amount", ""),
+            "Rate": "",
+            "Total": row.get("outstanding_amount", ""),
+            "Mode": row.get("mode", ""),
+            "Paid": row.get("paid_amount", ""),
+            "Outstanding": row.get("outstanding_amount", "")
+        })
+    total_credit = retail_credit.get("total")
+    if total_credit:
+        rows.append({
+            "Section": "Retail Credit",
+            "Label": "Total",
+            "Name": total_credit.get("label", "TOTAL CREDIT"),
+            "Nag": "",
+            "Weight": total_credit.get("total_amount", ""),
+            "Rate": "",
+            "Total": total_credit.get("outstanding_amount", ""),
+            "Mode": "",
+            "Paid": total_credit.get("paid_amount", ""),
+            "Outstanding": total_credit.get("outstanding_amount", "")
+        })
+
+    columns = ["Section", "Label", "Name", "Nag", "Weight", "Rate", "Total", "Mode", "Paid", "Outstanding"]
+    filename = safe_filename(f"stock_sheet_{target_date}")
+    title = sheet_payload.get("title") or "Stock Sheet"
+    return report_response(rows, columns, filename, "excel", title)
+
+
+def latest_item_rates(db: Session, target_date, scope=None):
+    query = db.query(
         models.Transaction.item_type,
         models.Transaction.rate,
         models.Transaction.date
@@ -807,7 +1597,10 @@ def latest_item_rates(db: Session, target_date):
         models.Transaction.rate.isnot(None),
         models.Transaction.date <= target_date,
         models.Transaction.type == "PURCHASE"
-    ).order_by(
+    )
+    if scope:
+        query = apply_outlet_scope(query, models.Transaction, scope)
+    rows = query.order_by(
         models.Transaction.item_type.asc(),
         models.Transaction.date.desc(),
         models.Transaction.created_at.desc()
@@ -820,21 +1613,84 @@ def latest_item_rates(db: Session, target_date):
     return rates
 
 
-def stock_item_names_query(db: Session):
-    sale_purchase_items = db.query(models.Transaction.item_type).filter(
+def stock_item_names_query(db: Session, scope=None):
+    purchase_query = db.query(models.Transaction.item_type).filter(
         models.Transaction.item_type.isnot(None),
-        models.Transaction.type.in_(["PURCHASE", "SALE"])
-    ).distinct().all()
-    opening_items = db.query(models.ItemOpeningStock.item_type).distinct().all()
+        models.Transaction.type == "PURCHASE"
+    )
+    if scope:
+        purchase_query = apply_outlet_scope(purchase_query, models.Transaction, scope)
+    purchase_items = purchase_query.distinct().all()
+
+    opening_query = db.query(models.ItemOpeningStock.item_type)
+    if scope:
+        opening_query = apply_outlet_scope(opening_query, models.ItemOpeningStock, scope)
+    opening_items = opening_query.distinct().all()
+
+    processed_query = db.query(models.DailyItemStock.item_type)
+    if scope:
+        processed_query = apply_outlet_scope(processed_query, models.DailyItemStock, scope)
+    processed_items = processed_query.distinct().all()
 
     items = set()
-    for row in sale_purchase_items:
+    for row in purchase_items:
         if row.item_type:
             items.add(row.item_type)
     for row in opening_items:
         if row.item_type:
             items.add(row.item_type)
+    for row in processed_items:
+        if row.item_type:
+            items.add(row.item_type)
     return items
+
+
+PROCESS_DAY_SOURCE_ITEMS = [
+    "BB",
+    "CB",
+    "COCREL",
+    "LEGOAN",
+    "DP"
+]
+
+RETAIL_SOURCE_TYPE_ALIASES = {
+    "BB": "BB",
+    "BB HOTEL": "BB",
+    "BB SHOP": "BB",
+    "BB WHOLESALE": "BB",
+    "BB DRESS": "BB",
+    "BONE": "BB",
+    "BONELESS": "BB",
+    "DRESS": "BB",
+    "LEG PIC": "BB",
+    "LEG THAI": "BB",
+    "THAI BONELESS": "BB",
+    "WINGS": "BB",
+    "CB": "CB",
+    "CB HOTEL": "CB",
+    "CB SHOP": "CB",
+    "CB WHOLESALE": "CB",
+    "COCREL": "COCREL",
+    "LEGOAN": "LEGOAN",
+    "DP": "DP",
+}
+
+
+def normalize_stock_source_key(value):
+    return " ".join(str(value or "").strip().upper().split())
+
+
+def resolve_stock_source_type(item_name="", source_item_type=""):
+    explicit = normalize_stock_source_key(source_item_type)
+    if explicit in PROCESS_DAY_SOURCE_ITEMS:
+        return explicit
+
+    normalized_item = normalize_stock_source_key(item_name)
+    mapped = RETAIL_SOURCE_TYPE_ALIASES.get(normalized_item)
+    if mapped:
+        return mapped
+
+    return explicit or normalized_item or ""
 
 
 def format_sheet_row(label, weight=0, rate=0, amount=0, nag=None):
@@ -928,59 +1784,110 @@ def parse_decimal(value, default="0"):
         return Decimal(default)
 
 
-def normalize_payment_breakdown(raw_breakdown):
-    if not isinstance(raw_breakdown, list):
+def canonicalize_retail_payment_mode(value, *, allow_credit=True):
+    raw_value = str(value or "").strip().upper()
+    if raw_value in ["UPI", "ONLINE", "ONLINE / UPI"]:
+        raw_value = "ONLINE"
+
+    mode_map = {
+        "CASH": "Cash",
+        "ONLINE": "Online",
+        "BANK": "Bank",
+        "CHEQUE": "Cheque",
+        "CREDIT": "Credit",
+    }
+    normalized = mode_map.get(raw_value)
+    if normalized == "Credit" and not allow_credit:
+        return ""
+    return normalized or ""
+
+
+def build_default_retail_payment_breakdown(payment_mode, paid_amount):
+    paid_total = parse_decimal(paid_amount)
+    if paid_total <= 0:
+        return []
+    normalized_mode = canonicalize_retail_payment_mode(payment_mode, allow_credit=False) or "Cash"
+    return [{"mode": normalized_mode, "amount": paid_total}]
+
+
+def normalize_retail_payment_breakdown(raw_breakdown, payment_mode, paid_amount):
+    paid_total = parse_decimal(paid_amount)
+    if paid_total <= 0:
         return []
 
-    normalized = []
-    for entry in raw_breakdown:
-        if not isinstance(entry, dict):
-            continue
-        mode = str(entry.get("mode") or entry.get("payment_mode") or "Cash").strip() or "Cash"
-        amount = parse_decimal(entry.get("amount"))
-        if amount <= 0:
-            continue
-        normalized.append({
-            "mode": mode,
-            "amount": amount
-        })
-    return normalized
-
-
-def serialize_payment_breakdown(raw_value):
-    if not raw_value:
-        return []
-
-    parsed = raw_value
-    if isinstance(raw_value, str):
+    breakdown = raw_breakdown
+    if isinstance(breakdown, str):
         try:
-            parsed = json.loads(raw_value)
+            breakdown = json.loads(breakdown)
         except Exception:
-            return []
+            breakdown = None
 
+    merged_breakdown = {}
+    if isinstance(breakdown, list):
+        for entry in breakdown:
+            if not isinstance(entry, dict):
+                continue
+            normalized_mode = canonicalize_retail_payment_mode(entry.get("mode"), allow_credit=False)
+            amount = parse_decimal(entry.get("amount"))
+            if not normalized_mode or amount <= 0:
+                continue
+            merged_breakdown[normalized_mode] = merged_breakdown.get(normalized_mode, Decimal("0")) + amount
+
+    if not merged_breakdown:
+        return build_default_retail_payment_breakdown(payment_mode, paid_total)
+
+    normalized_breakdown = [
+        {"mode": mode, "amount": amount}
+        for mode, amount in merged_breakdown.items()
+        if amount > 0
+    ]
+    total_from_breakdown = sum((entry["amount"] for entry in normalized_breakdown), Decimal("0"))
+    if total_from_breakdown != paid_total:
+        raise ValueError("Split payment total must match the paid amount")
+
+    return normalized_breakdown
+
+
+def summarize_retail_payment_mode(payment_breakdown, outstanding_amount):
+    summary_modes = [entry["mode"] for entry in payment_breakdown if entry.get("mode")]
+    if parse_decimal(outstanding_amount) > 0:
+        summary_modes.append("Credit")
+
+    ordered_modes = []
+    for mode in summary_modes:
+        if mode and mode not in ordered_modes:
+            ordered_modes.append(mode)
+
+    if not ordered_modes:
+        return "Credit"
+    return " + ".join(ordered_modes)
+
+
+def serialize_retail_payment_breakdown(payment_breakdown):
     return [
         {
-            "mode": str(entry.get("mode") or entry.get("payment_mode") or "Cash").strip() or "Cash",
-            "amount": float(parse_decimal(entry.get("amount")))
+            "mode": entry["mode"],
+            "amount": float(entry["amount"] or 0)
         }
-        for entry in (parsed or [])
-        if isinstance(entry, dict) and parse_decimal(entry.get("amount")) > 0
+        for entry in payment_breakdown
+        if entry.get("mode")
     ]
 
 
-def build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, fallback_mode="Cash"):
-    if payment_breakdown:
-        seen = []
-        for entry in payment_breakdown:
-            mode = str(entry.get("mode") or "Cash").strip() or "Cash"
-            if mode not in seen:
-                seen.append(mode)
-        if seen:
-            return " + ".join(seen)
-
-    if paid_amount <= 0 and outstanding_amount > 0:
-        return "Credit"
-    return str(fallback_mode or "Cash").strip() or "Cash"
+def deserialize_retail_payment_breakdown(bill):
+    raw_breakdown = getattr(bill, "payment_breakdown", None)
+    try:
+        normalized_breakdown = normalize_retail_payment_breakdown(
+            raw_breakdown,
+            getattr(bill, "payment_mode", None),
+            getattr(bill, "paid_amount", None),
+        )
+    except ValueError:
+        normalized_breakdown = build_default_retail_payment_breakdown(
+            getattr(bill, "payment_mode", None),
+            getattr(bill, "paid_amount", None),
+        )
+    return serialize_retail_payment_breakdown(normalized_breakdown)
 
 
 def serialize_dressed_stock_entry(entry):
@@ -999,11 +1906,19 @@ def serialize_dressed_stock_entry(entry):
 
 def serialize_retail_bill(bill, items):
     created_at = bill.created_at or datetime.utcnow()
-    bill_mode = "dressed" if any((item.line_type or "STANDARD").upper() == "DRESSED" for item in items) else "regular"
-    payment_breakdown = serialize_payment_breakdown(getattr(bill, "payment_breakdown", None))
+    has_dressed = any((item.line_type or "STANDARD").upper() == "DRESSED" for item in items)
+    has_regular = any((item.line_type or "STANDARD").upper() != "DRESSED" for item in items)
+    if has_regular and has_dressed:
+        bill_mode = "both"
+    elif has_dressed:
+        bill_mode = "dressed"
+    else:
+        bill_mode = "regular"
+    payment_breakdown = deserialize_retail_payment_breakdown(bill)
 
     return {
         "id": str(bill.id),
+        "outlet_id": str(bill.outlet_id) if getattr(bill, "outlet_id", None) else "",
         "bill_number": bill.bill_number,
         "bill_mode": bill_mode,
         "date": str(bill.date),
@@ -1028,6 +1943,7 @@ def serialize_retail_bill(bill, items):
                 "line_order": item.line_order,
                 "item_name": item.item_name,
                 "line_type": (item.line_type or "STANDARD").upper(),
+                "source_item_type": item.source_item_type or "",
                 "nag": float(item.quantity or 0),
                 "quantity": float(item.quantity or 0),
                 "unit": item.unit or "KGS",
@@ -1040,69 +1956,32 @@ def serialize_retail_bill(bill, items):
     }
 
 
-def retail_party_balance_after(db: Session, party_id):
+def retail_party_balance_after(db: Session, party_id, outlet_id=None):
     if not party_id:
         return None
 
-    txns = db.query(models.Transaction).filter(
+    txns_query = db.query(models.Transaction).filter(
         models.Transaction.party_id == party_id
-    ).order_by(
+    )
+    if outlet_id:
+        txns_query = txns_query.filter(models.Transaction.outlet_id == outlet_id)
+    txns = txns_query.order_by(
         models.Transaction.date.asc(),
         models.Transaction.created_at.asc()
     ).all()
-    txns = filter_party_ledger_transactions(db, txns)
-
-    balance_after, _ = build_ledger(txns)
+    balance_after, _ = build_ledger(db, txns)
     return float(balance_after or 0)
 
 
 def filter_party_ledger_transactions(db: Session, txns):
-    if not txns:
-        return txns
-
-    retail_keys = {
-        (txn.date, txn.party_id, str(txn.bill_number or "").strip())
-        for txn in txns
-        if txn.party_id
-        and str(txn.bill_number or "").strip()
-        and txn.type == "SALE"
-        and (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"]
-    }
-
-    if not retail_keys:
-        return txns
-
-    retail_dates = {key[0] for key in retail_keys}
-    retail_parties = {key[1] for key in retail_keys}
-    retail_bill_numbers = {key[2] for key in retail_keys}
-
-    paid_bill_keys = {
-        (bill.date, bill.party_id, str(bill.bill_number or "").strip())
-        for bill in db.query(models.RetailBill).filter(
-            models.RetailBill.party_id.in_(list(retail_parties)),
-            models.RetailBill.date.in_(list(retail_dates)),
-            models.RetailBill.bill_number.in_(list(retail_bill_numbers)),
-            models.RetailBill.outstanding_amount <= 0
-        ).all()
-    }
-
-    if not paid_bill_keys:
-        return txns
-
-    return [
-        txn for txn in txns
-        if not (
-            txn.type == "SALE" and
-            (txn.category or "").upper() in ["RETAIL", "RETAIL DRESSED"] and
-            (txn.date, txn.party_id, str(txn.bill_number or "").strip()) in paid_bill_keys
-        )
-    ]
+    return txns
 
 
 def serialize_payment_receipt(receipt, balance_after=None):
     created_at = receipt.created_at or datetime.utcnow()
     return {
         "id": str(receipt.id),
+        "outlet_id": str(receipt.outlet_id) if getattr(receipt, "outlet_id", None) else "",
         "receipt_number": receipt.receipt_number,
         "date": str(receipt.date),
         "time": created_at.strftime("%H:%M:%S"),
@@ -1118,13 +1997,17 @@ def serialize_payment_receipt(receipt, balance_after=None):
     }
 
 
-def recompute_dressed_stock_remaining(db: Session, target_date):
+def recompute_dressed_stock_remaining(db: Session, target_date, outlet_id=None):
     if not target_date:
         return
 
-    entries = db.query(models.DressedStockEntry).filter(
+    entries_query = db.query(models.DressedStockEntry).filter(
         models.DressedStockEntry.date == target_date
-    ).order_by(
+    )
+    if outlet_id:
+        entries_query = entries_query.filter(models.DressedStockEntry.outlet_id == outlet_id)
+
+    entries = entries_query.order_by(
         models.DressedStockEntry.created_at.asc()
     ).all()
 
@@ -1135,7 +2018,7 @@ def recompute_dressed_stock_remaining(db: Session, target_date):
         base_weight = Decimal(entry.dressed_weight or 0)
         entry.remaining_dressed_weight = base_weight if base_weight > 0 else Decimal("0")
 
-    total_dressed_sold = db.query(
+    total_dressed_sold_query = db.query(
         func.coalesce(func.sum(models.RetailBillItem.weight), 0)
     ).join(
         models.RetailBill,
@@ -1143,7 +2026,10 @@ def recompute_dressed_stock_remaining(db: Session, target_date):
     ).filter(
         models.RetailBill.date == target_date,
         models.RetailBillItem.line_type == "DRESSED"
-    ).scalar()
+    )
+    if outlet_id:
+        total_dressed_sold_query = total_dressed_sold_query.filter(models.RetailBill.outlet_id == outlet_id)
+    total_dressed_sold = total_dressed_sold_query.scalar()
 
     remaining_required = Decimal(total_dressed_sold or 0)
     for entry in entries:
@@ -1168,7 +2054,13 @@ def merge_party_type(existing_type: str | None, new_type: str | None):
     return "BOTH"
 
 
-def update_party_details(party, party_type: str | None = None, phone: str | None = None, address: str | None = None):
+def update_party_details(
+    party,
+    party_type: str | None = None,
+    phone: str | None = None,
+    address: str | None = None,
+    overwrite_contact: bool = False
+):
     if party is None:
         return
 
@@ -1178,9 +2070,9 @@ def update_party_details(party, party_type: str | None = None, phone: str | None
 
     cleaned_phone = str(phone or "").strip()
     cleaned_address = str(address or "").strip()
-    if cleaned_phone and not (party.phone or "").strip():
+    if cleaned_phone and (overwrite_contact or not (party.phone or "").strip()):
         party.phone = cleaned_phone
-    if cleaned_address and not (party.address or "").strip():
+    if cleaned_address and (overwrite_contact or not (party.address or "").strip()):
         party.address = cleaned_address
 
 
@@ -1298,7 +2190,7 @@ def resolve_upload_date(row, date_col, fallback_date):
 
 
 @app.post("/entries/vendor")
-def create_vendor_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_vendor_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1331,6 +2223,7 @@ def create_vendor_entries(payload: dict = Body(...), input_date: str = None, db:
             txn_key = (target_date, party_id, float(weight), float(rate), "SALE", category, item_type)
             existing_txn = db.query(models.Transaction).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 weight=float(weight),
                 rate=float(rate),
@@ -1345,6 +2238,7 @@ def create_vendor_entries(payload: dict = Body(...), input_date: str = None, db:
 
             db.add(models.Transaction(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="SALE",
                 category=category,
@@ -1371,7 +2265,7 @@ def create_vendor_entries(payload: dict = Body(...), input_date: str = None, db:
 
 
 @app.post("/entries/dealer")
-def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1394,16 +2288,24 @@ def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db:
             quantity = parse_decimal(row.get("nag", row.get("quantity")))
             weight = parse_decimal(row.get("kgs", row.get("weight")))
             rate = parse_decimal(row.get("rate_per_kg", row.get("rate")))
+            transport_mortality_nag = parse_decimal(row.get("transport_mortality_nag"))
+            transport_mortality_weight = parse_decimal(row.get("transport_mortality_weight"))
 
             if not party_name or not item_type or weight <= 0 or rate <= 0 or quantity < 0:
                 skipped += 1
                 row_error(errors, index, "Enter dealer, hen type, valid NAG, kg, and rate")
                 continue
 
+            if transport_mortality_nag < 0 or transport_mortality_weight < 0:
+                skipped += 1
+                row_error(errors, index, "Transport mortality NAG and kg cannot be negative")
+                continue
+
             party_id = get_or_create_party(db, party_name, "DEALER", seen_aliases)
             txn_key = (target_date, party_id, float(weight), float(rate), "PURCHASE", bill_number or "", item_type)
             existing_txn = db.query(models.Transaction).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 weight=float(weight),
                 rate=float(rate),
@@ -1419,6 +2321,7 @@ def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db:
 
             db.add(models.Transaction(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="PURCHASE",
                 category=None,
@@ -1431,6 +2334,45 @@ def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db:
                 bill_number=bill_number
             ))
             seen_transactions.add(txn_key)
+
+            if transport_mortality_nag > 0 or transport_mortality_weight > 0:
+                mortality_key = (
+                    target_date,
+                    party_id,
+                    float(transport_mortality_nag),
+                    float(transport_mortality_weight),
+                    "TRANSPORTATION MORTALITY",
+                    bill_number or "",
+                    item_type
+                )
+                existing_mortality = db.query(models.Transaction).filter_by(
+                    date=target_date,
+                    outlet_id=current_outlet.id,
+                    party_id=party_id,
+                    type="MORTALITY",
+                    category="TRANSPORTATION MORTALITY",
+                    item_type=item_type,
+                    quantity=transport_mortality_nag if transport_mortality_nag > 0 else None,
+                    weight=transport_mortality_weight if transport_mortality_weight > 0 else 0,
+                    bill_number=bill_number
+                ).first()
+
+                if not existing_mortality and mortality_key not in seen_transactions:
+                    db.add(models.Transaction(
+                        date=target_date,
+                        outlet_id=current_outlet.id,
+                        party_id=party_id,
+                        type="MORTALITY",
+                        category="TRANSPORTATION MORTALITY",
+                        item_type=item_type,
+                        quantity=transport_mortality_nag if transport_mortality_nag > 0 else None,
+                        weight=transport_mortality_weight if transport_mortality_weight > 0 else 0,
+                        rate=0,
+                        amount=0,
+                        payment_mode="NA",
+                        bill_number=bill_number
+                    ))
+                    seen_transactions.add(mortality_key)
             inserted += 1
         except Exception as e:
             skipped += 1
@@ -1446,7 +2388,7 @@ def create_dealer_entries(payload: dict = Body(...), input_date: str = None, db:
 
 
 @app.post("/entries/payment")
-def create_payment_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_payment_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1477,6 +2419,7 @@ def create_payment_entries(payload: dict = Body(...), input_date: str = None, db
             payment_key = (target_date, party_id, float(amount), payment_mode, direction)
             existing_payment = db.query(models.Transaction).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="PAYMENT",
                 amount=amount,
@@ -1490,6 +2433,7 @@ def create_payment_entries(payload: dict = Body(...), input_date: str = None, db
 
             db.add(models.Transaction(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="PAYMENT",
                 category=direction,
@@ -1512,7 +2456,7 @@ def create_payment_entries(payload: dict = Body(...), input_date: str = None, db
 
 
 @app.post("/entries/mortality")
-def create_mortality_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_mortality_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1547,12 +2491,13 @@ def create_mortality_entries(payload: dict = Body(...), input_date: str = None, 
                 row_error(errors, index, "Enter NAG or weight")
                 continue
 
-            txn_key = (target_date, item_type, float(quantity), float(weight), "MORTALITY")
+            txn_key = (target_date, item_type, float(quantity), float(weight), "SHOP MORTALITY")
             existing_txn = db.query(models.Transaction).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=None,
                 type="MORTALITY",
-                category="MORTALITY",
+                category="SHOP MORTALITY",
                 item_type=item_type,
                 quantity=quantity if quantity > 0 else None,
                 weight=weight if weight > 0 else 0
@@ -1564,9 +2509,10 @@ def create_mortality_entries(payload: dict = Body(...), input_date: str = None, 
 
             db.add(models.Transaction(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=None,
                 type="MORTALITY",
-                category="MORTALITY",
+                category="SHOP MORTALITY",
                 item_type=item_type,
                 quantity=quantity if quantity > 0 else None,
                 weight=weight if weight > 0 else 0,
@@ -1590,7 +2536,7 @@ def create_mortality_entries(payload: dict = Body(...), input_date: str = None, 
 
 
 @app.post("/entries/opening-balance")
-def create_opening_balance_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_opening_balance_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1631,6 +2577,7 @@ def create_opening_balance_entries(payload: dict = Body(...), input_date: str = 
             opening_key = (target_date, party_id, balance_type)
             existing_opening = db.query(models.Transaction).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="OPENING",
                 category=balance_type
@@ -1641,6 +2588,7 @@ def create_opening_balance_entries(payload: dict = Body(...), input_date: str = 
 
             db.add(models.Transaction(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 party_id=party_id,
                 type="OPENING",
                 category=balance_type,
@@ -1663,7 +2611,7 @@ def create_opening_balance_entries(payload: dict = Body(...), input_date: str = 
 
 
 @app.post("/entries/opening-stock")
-def create_opening_stock_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_opening_stock_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -1691,6 +2639,7 @@ def create_opening_stock_entries(payload: dict = Body(...), input_date: str = No
             stock_key = (target_date, item_type)
             existing_stock = db.query(models.ItemOpeningStock).filter_by(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 item_type=item_type
             ).first()
             if existing_stock or stock_key in seen_stock:
@@ -1699,6 +2648,7 @@ def create_opening_stock_entries(payload: dict = Body(...), input_date: str = No
 
             db.add(models.ItemOpeningStock(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 item_type=item_type,
                 opening_quantity=opening_quantity if opening_quantity > 0 else None,
                 opening_weight=opening_weight
@@ -2515,7 +3465,7 @@ def process_day(input_date: str, actual_stock: float, db: Session = Depends(get_
 
 
 @app.post("/process-day/items")
-def process_day_items(input_date: str, actual_stock: list[dict], db: Session = Depends(get_db)):
+def process_day_items(input_date: str, actual_stock: list[dict], db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Invalid date format"}
@@ -2545,59 +3495,33 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
             "actual_quantity": actual_quantity
         }
 
-    expected_items = set()
-    latest_previous_stock = {}
-    for row in db.query(models.DailyItemStock).filter(
-        models.DailyItemStock.date < target_date
-    ).order_by(
-        models.DailyItemStock.item_type.asc(),
-        models.DailyItemStock.date.desc()
-    ).all():
-        latest_previous_stock.setdefault(row.item_type, row)
+    expected_items = list(PROCESS_DAY_SOURCE_ITEMS)
+    for item in expected_items:
+        normalized_actuals.setdefault(item, {
+            "actual_weight": Decimal("0"),
+            "actual_quantity": Decimal("0")
+        })
 
-    for item_type, row in latest_previous_stock.items():
-        if Decimal(row.actual_closing_weight or 0) > 0 or Decimal(row.actual_closing_quantity or 0) > 0:
-            expected_items.add(item_type)
-
-    latest_openings = {}
-    for row in db.query(models.ItemOpeningStock).filter(
-        models.ItemOpeningStock.date <= target_date
-    ).order_by(
-        models.ItemOpeningStock.item_type.asc(),
-        models.ItemOpeningStock.date.desc()
-    ).all():
-        latest_openings.setdefault(row.item_type, row)
-
-    for item_type, row in latest_openings.items():
-        if Decimal(row.opening_weight or 0) > 0 or Decimal(row.opening_quantity or 0) > 0:
-            expected_items.add(item_type)
-
-    for row in db.query(models.Transaction.item_type).filter(
-        models.Transaction.date == target_date,
-        models.Transaction.type.in_(["PURCHASE", "SALE"]),
-        models.Transaction.item_type.isnot(None)
-    ).distinct().all():
-        if row.item_type:
-            expected_items.add(row.item_type)
-
-    missing_items = sorted(item for item in expected_items if item not in normalized_actuals)
-    if missing_items:
-        return {"error": f"Enter actual stock for all tracked hen types. Missing: {', '.join(missing_items[:8])}"}
-
-    existing = db.query(models.DailyItemStock).filter(
-        models.DailyItemStock.date == target_date,
-        models.DailyItemStock.item_type.in_(list(normalized_actuals.keys()))
-    ).first()
-    if existing:
-        return {"error": "One or more hen types already processed for this day"}
+    existing_rows = db.query(models.DailyItemStock).filter(
+        models.DailyItemStock.outlet_id == current_outlet.id,
+        models.DailyItemStock.date == target_date
+    ).all()
+    replaced_existing = len(existing_rows) > 0
 
     results = []
 
     try:
+        if replaced_existing:
+            db.query(models.DailyItemStock).filter(
+                models.DailyItemStock.outlet_id == current_outlet.id,
+                models.DailyItemStock.date == target_date
+            ).delete(synchronize_session=False)
+
         for item_type, actuals in normalized_actuals.items():
             actual_weight = actuals["actual_weight"]
             actual_quantity = actuals["actual_quantity"]
             prev_stock = db.query(models.DailyItemStock).filter(
+                models.DailyItemStock.outlet_id == current_outlet.id,
                 models.DailyItemStock.item_type == item_type,
                 models.DailyItemStock.date < target_date
             ).order_by(models.DailyItemStock.date.desc()).first()
@@ -2607,6 +3531,7 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
                 opening_quantity = Decimal(prev_stock.actual_closing_quantity or 0) if prev_stock.actual_closing_quantity is not None else None
             else:
                 opening = db.query(models.ItemOpeningStock).filter(
+                    models.ItemOpeningStock.outlet_id == current_outlet.id,
                     models.ItemOpeningStock.item_type == item_type,
                     models.ItemOpeningStock.date <= target_date
                 ).order_by(models.ItemOpeningStock.date.desc()).first()
@@ -2614,22 +3539,26 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
                 opening_quantity = Decimal(opening.opening_quantity or 0) if opening and opening.opening_quantity is not None else None
 
             purchase_weight = db.query(func.sum(models.Transaction.weight)).filter(
+                models.Transaction.outlet_id == current_outlet.id,
                 models.Transaction.date == target_date,
                 models.Transaction.item_type == item_type,
                 models.Transaction.type == "PURCHASE"
             ).scalar() or 0
             purchase_quantity_raw = db.query(func.sum(models.Transaction.quantity)).filter(
+                models.Transaction.outlet_id == current_outlet.id,
                 models.Transaction.date == target_date,
                 models.Transaction.item_type == item_type,
                 models.Transaction.type == "PURCHASE"
             ).scalar()
 
             sales_weight = db.query(func.sum(models.Transaction.weight)).filter(
+                models.Transaction.outlet_id == current_outlet.id,
                 models.Transaction.date == target_date,
                 models.Transaction.item_type == item_type,
                 models.Transaction.type == "SALE"
             ).scalar() or 0
             sales_quantity_raw = db.query(func.sum(models.Transaction.quantity)).filter(
+                models.Transaction.outlet_id == current_outlet.id,
                 models.Transaction.date == target_date,
                 models.Transaction.item_type == item_type,
                 models.Transaction.type == "SALE"
@@ -2650,6 +3579,7 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
 
             daily = models.DailyItemStock(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 item_type=item_type,
                 opening_quantity=opening_quantity,
                 opening_weight=opening_weight,
@@ -2691,9 +3621,11 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
         total_leakage_weight = sum(Decimal(str(row["leakage"])) for row in results)
 
         daily_stock = db.query(models.DailyStock).filter(
+            models.DailyStock.outlet_id == current_outlet.id,
             models.DailyStock.date == target_date
         ).first()
         if daily_stock:
+            daily_stock.outlet_id = current_outlet.id
             daily_stock.opening_weight = total_opening_weight
             daily_stock.purchase_weight = total_purchase_weight
             daily_stock.sales_weight = total_sales_weight
@@ -2703,6 +3635,7 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
         else:
             db.add(models.DailyStock(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 opening_weight=total_opening_weight,
                 purchase_weight=total_purchase_weight,
                 sales_weight=total_sales_weight,
@@ -2717,16 +3650,35 @@ def process_day_items(input_date: str, actual_stock: list[dict], db: Session = D
         db.rollback()
         return {"error": "Processing failed", "details": str(e)}
 
+    sheet_payload = daily_sheet(
+        date=str(target_date),
+        sheet_type="stock",
+        db=db,
+        user=None,
+        scope={
+            "mode": "single",
+            "selected": current_outlet,
+            "outlet": current_outlet,
+            "outlet_id": current_outlet.id,
+        }
+    )
+
+    final_stock = sheet_payload.get("final_stock", {}) if isinstance(sheet_payload, dict) else {}
+    closing_total = final_stock.get("closing_stock", {}) if isinstance(final_stock, dict) else {}
+    actual_total = final_stock.get("actual_stock", {}) if isinstance(final_stock, dict) else {}
+    short_total = final_stock.get("short_by", {}) if isinstance(final_stock, dict) else {}
+
     return {
         "status": "success",
         "date": str(target_date),
+        "replaced_existing": replaced_existing,
         "items": results,
-        "total_expected_nag": float(optional_decimal_sum(row["expected_nag"] for row in results) or 0),
-        "total_expected_stock": sum(row["expected_stock"] for row in results),
-        "total_actual_nag": float(optional_decimal_sum(row["actual_nag"] for row in results) or 0),
-        "total_actual_stock": sum(row["actual_stock"] for row in results),
-        "total_quantity_leakage": float(optional_decimal_sum(row["quantity_leakage"] for row in results) or 0),
-        "total_leakage": sum(row["leakage"] for row in results)
+        "total_expected_nag": float(closing_total.get("nag") or 0),
+        "total_expected_stock": float(closing_total.get("weight") or 0),
+        "total_actual_nag": float(actual_total.get("nag") or 0),
+        "total_actual_stock": float(actual_total.get("weight") or 0),
+        "total_quantity_leakage": float(short_total.get("nag") or 0),
+        "total_leakage": float(short_total.get("weight") or 0)
     }
 
 
@@ -2735,7 +3687,8 @@ def get_party_ledger(
     party_id: UUID,
     start_date: str | None = None,
     end_date: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    scope=Depends(get_outlet_scope)
 ):
 
     # --- Validate party ---
@@ -2743,7 +3696,11 @@ def get_party_ledger(
     if not party:
         return {"error": "Party not found"}
 
-    query = db.query(models.Transaction).filter_by(party_id=party_id)
+    query = apply_outlet_scope(
+        db.query(models.Transaction).filter_by(party_id=party_id),
+        models.Transaction,
+        scope
+    )
 
     if start_date:
         start = parse_input_date(start_date)
@@ -2766,17 +3723,17 @@ def get_party_ledger(
             "party_id": party_id,
             "party_name": party.name,
             "total_balance": 0,
-            "summary": build_party_summary([], Decimal("0")),
+            "summary": build_party_summary(db, [], Decimal("0")),
             "ledger": []
         }
 
-    balance, ledger = build_ledger(txns)
+    balance, ledger = build_ledger(db, txns)
 
     return {
         "party_id": party_id,
         "party_name": party.name,
         "total_balance": float(balance),
-        "summary": build_party_summary(txns, balance),
+        "summary": build_party_summary(db, txns, balance),
         "ledger": ledger
     }
 
@@ -2820,7 +3777,7 @@ def search_party(name: str, db: Session = Depends(get_db)):
 
 
 @app.get("/party/profile")
-def get_party_profile(name: str, db: Session = Depends(get_db)):
+def get_party_profile(name: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     if not name or len(name.strip()) < 2:
         return {"error": "Invalid party name"}
 
@@ -2828,13 +3785,15 @@ def get_party_profile(name: str, db: Session = Depends(get_db)):
     if not party:
         return {"error": "Party not found"}
 
-    txns = db.query(models.Transaction).filter(
-        models.Transaction.party_id == party.id
+    txns = apply_outlet_scope(
+        db.query(models.Transaction).filter(models.Transaction.party_id == party.id),
+        models.Transaction,
+        scope
     ).order_by(
         models.Transaction.date.asc(),
         models.Transaction.created_at.asc()
     ).all()
-    balance_after, _ = build_ledger(txns)
+    balance_after, _ = build_ledger(db, txns)
 
     return {
         "party": {
@@ -2888,6 +3847,7 @@ def save_party_directory(payload: dict = Body(...), db: Session = Depends(get_db
 
     for index, row in enumerate(rows, start=1):
         try:
+            party_id_raw = str(row.get("party_id") or "").strip()
             party_name = str(row.get("name") or row.get("party") or "").strip()
             party_type = str(row.get("type") or "BOTH").strip().upper() or "BOTH"
             phone = str(row.get("phone") or "").strip()
@@ -2898,13 +3858,41 @@ def save_party_directory(payload: dict = Body(...), db: Session = Depends(get_db
                 row_error(errors, index, "Enter party name")
                 continue
 
-            party = get_party_by_name(db, party_name)
+            party = None
+            if party_id_raw:
+                try:
+                    party = db.query(models.Party).filter_by(id=UUID(party_id_raw)).first()
+                except ValueError:
+                    party = None
+            if party is None:
+                party = get_party_by_name(db, party_name)
             if party:
-                had_details = bool((party.phone or "").strip() or (party.address or "").strip())
-                update_party_details(party, party_type, phone, address)
+                had_name = party.name
+                had_type = party.type or ""
+                had_phone = (party.phone or "").strip()
+                had_address = (party.address or "").strip()
+                update_party_details(party, party_type, phone, address, overwrite_contact=True)
                 if party.name != party_name:
                     party.name = party_name
-                updated += 1 if had_details or phone or address or party_type else 0
+                    party.normalized_name = normalize_party_name(party_name)
+                    normalized_alias = party.normalized_name
+                    alias = db.query(models.PartyAlias).filter_by(
+                        party_id=party.id,
+                        normalized_alias=normalized_alias
+                    ).first()
+                    if not alias:
+                        db.add(models.PartyAlias(
+                            alias=party_name,
+                            normalized_alias=normalized_alias,
+                            party_id=party.id
+                        ))
+                changed = any([
+                    had_name != party.name,
+                    had_type != (party.type or ""),
+                    had_phone != (party.phone or "").strip(),
+                    had_address != (party.address or "").strip()
+                ])
+                updated += 1 if changed else 0
             else:
                 get_or_create_party(db, party_name, party_type, {}, phone=phone, address=address)
                 inserted += 1
@@ -2932,7 +3920,8 @@ def get_ledger_by_name(
     name: str,
     start_date: str | None = None,
     end_date: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    scope=Depends(get_outlet_scope)
 ):
     if not name or len(name.strip()) < 2:
         return {"error": "Invalid party name"}
@@ -2978,8 +3967,10 @@ def get_ledger_by_name(
     # --- Step 4: Single match → ledger ---
     party_id = party_ids[0]
 
-    query = db.query(models.Transaction).filter(
-        models.Transaction.party_id == party_id
+    query = apply_outlet_scope(
+        db.query(models.Transaction).filter(models.Transaction.party_id == party_id),
+        models.Transaction,
+        scope
     )
 
     if start_date:
@@ -3002,22 +3993,22 @@ def get_ledger_by_name(
         return {
             "party_name": party.name if party else name,
             "total_balance": 0,
-            "summary": build_party_summary([], Decimal("0")),
+        "summary": build_party_summary(db, [], Decimal("0")),
             "ledger": []
         }
 
-    balance, ledger = build_ledger(txns)
+    balance, ledger = build_ledger(db, txns)
 
     return {
         "party_name": party.name if party else name,
         "total_balance": float(balance),
-        "summary": build_party_summary(txns, balance),
+        "summary": build_party_summary(db, txns, balance),
         "ledger": ledger
     }
 
 
 @app.get("/party/detail")
-def get_party_detail(name: str, db: Session = Depends(get_db)):
+def get_party_detail(name: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     if not name or len(name.strip()) < 2:
         return {"error": "Invalid party name"}
 
@@ -3038,12 +4029,14 @@ def get_party_detail(name: str, db: Session = Depends(get_db)):
     if not party:
         return {"error": "Party not found"}
 
-    txns = db.query(models.Transaction).filter_by(
-        party_id=party.id
+    txns = apply_outlet_scope(
+        db.query(models.Transaction).filter_by(party_id=party.id),
+        models.Transaction,
+        scope
     ).order_by(models.Transaction.date.asc()).all()
     txns = filter_party_ledger_transactions(db, txns)
 
-    balance, ledger = build_ledger(txns)
+    balance, ledger = build_ledger(db, txns)
 
     return {
         "party": {
@@ -3053,7 +4046,7 @@ def get_party_detail(name: str, db: Session = Depends(get_db)):
             "phone": party.phone or "",
             "address": party.address or ""
         },
-        "summary": build_party_summary(txns, balance),
+        "summary": build_party_summary(db, txns, balance),
         "ledger": ledger
     }
 
@@ -3066,7 +4059,8 @@ def export_report(
     start_date: str | None = None,
     end_date: str | None = None,
     date: str | None = None,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    scope=Depends(get_outlet_scope)
 ):
     report_type = report_type.lower().strip()
     file_format = file_format.lower().strip()
@@ -3074,6 +4068,9 @@ def export_report(
 
     if (start_date and not start) or (end_date and not end):
         return {"error": "Invalid date format"}
+
+    if report_type == "inventory" and scope["mode"] == "all":
+        return {"error": "Select one outlet for inventory report"}
 
     if report_type == "ledger":
         if not party or len(party.strip()) < 2:
@@ -3093,7 +4090,11 @@ def export_report(
             return {"error": "Party not found"}
 
         party_row = db.query(models.Party).filter_by(id=alias.party_id).first()
-        query = db.query(models.Transaction).filter(models.Transaction.party_id == alias.party_id)
+        query = apply_outlet_scope(
+            db.query(models.Transaction).filter(models.Transaction.party_id == alias.party_id),
+            models.Transaction,
+            scope
+        )
 
         if start:
             query = query.filter(models.Transaction.date >= start)
@@ -3102,7 +4103,7 @@ def export_report(
 
         txns = query.order_by(models.Transaction.date.asc()).all()
         txns = filter_party_ledger_transactions(db, txns)
-        balance, ledger = build_ledger(txns)
+        balance, ledger = build_ledger(db, txns)
         rows = [
             {
                 "Party": party_row.name if party_row else party,
@@ -3139,7 +4140,7 @@ def export_report(
         return report_response(rows, columns, filename, file_format, f"Ledger Report - {party}")
 
     if report_type == "summary":
-        query = db.query(models.Transaction)
+        query = apply_outlet_scope(db.query(models.Transaction), models.Transaction, scope)
         if start:
             query = query.filter(models.Transaction.date >= start)
         if end:
@@ -3192,13 +4193,18 @@ def export_report(
         parties = db.query(models.Party).order_by(models.Party.name.asc()).all()
 
         for party_row in parties:
-            query = db.query(models.Transaction).filter_by(party_id=party_row.id)
+            query = apply_outlet_scope(
+                db.query(models.Transaction).filter_by(party_id=party_row.id),
+                models.Transaction,
+                scope
+            )
             if start:
                 query = query.filter(models.Transaction.date >= start)
             if end:
                 query = query.filter(models.Transaction.date <= end)
             txns = query.all()
-            receivable = sum(receivable_delta(t) for t in txns)
+            settled_keys = settled_retail_bill_keys(db, txns)
+            receivable = sum(receivable_delta(t, settled_keys) for t in txns)
             payable = sum(payable_delta(t) for t in txns)
 
             if receivable or payable:
@@ -3219,12 +4225,13 @@ def export_report(
             return {"error": "Invalid date format"}
 
         rows = []
-        items = stock_item_names_query(db)
+        items = stock_item_names_query(db, scope)
 
         for item in sorted(items):
-            processed = db.query(models.DailyItemStock).filter_by(
-                date=target,
-                item_type=item
+            processed = apply_outlet_scope(
+                db.query(models.DailyItemStock).filter_by(date=target, item_type=item),
+                models.DailyItemStock,
+                scope
             ).first()
 
             if processed:
@@ -3240,16 +4247,24 @@ def export_report(
                 })
                 continue
 
-            opening = db.query(models.ItemOpeningStock).filter(
-                models.ItemOpeningStock.item_type == item,
-                models.ItemOpeningStock.date <= target
+            opening = apply_outlet_scope(
+                db.query(models.ItemOpeningStock).filter(
+                    models.ItemOpeningStock.item_type == item,
+                    models.ItemOpeningStock.date <= target
+                ),
+                models.ItemOpeningStock,
+                scope
             ).order_by(models.ItemOpeningStock.date.desc()).first()
 
             opening_date = opening.date if opening else None
             opening_weight = Decimal(opening.opening_weight or 0) if opening else Decimal("0")
-            query = db.query(models.Transaction).filter(
-                models.Transaction.item_type == item,
-                models.Transaction.date <= target
+            query = apply_outlet_scope(
+                db.query(models.Transaction).filter(
+                    models.Transaction.item_type == item,
+                    models.Transaction.date <= target
+                ),
+                models.Transaction,
+                scope
             )
 
             if opening_date:
@@ -3279,6 +4294,7 @@ def export_report(
             models.Party,
             models.Transaction.party_id == models.Party.id
         )
+        query = apply_outlet_scope(query, models.Transaction, scope)
         if start:
             query = query.filter(models.Transaction.date >= start)
         if end:
@@ -3313,7 +4329,7 @@ def export_report(
 
 
 @app.get("/dashboard")
-def get_dashboard(date: str, db: Session = Depends(get_db)):
+def get_dashboard(date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
 
     target_date = parse_input_date(date)
     if not target_date:
@@ -3336,7 +4352,8 @@ def get_dashboard(date: str, db: Session = Depends(get_db)):
             func.sum(receivable_case()).label("receivable"),
             func.sum(payable_case()).label("payable")
         ).filter(
-            models.Transaction.date <= target_date
+            models.Transaction.date <= target_date,
+            outlet_scope_filter(models.Transaction, scope)
         ).first()
 
         daily_totals = db.query(
@@ -3353,7 +4370,8 @@ def get_dashboard(date: str, db: Session = Depends(get_db)):
                 )
             ).label("purchase")
         ).filter(
-            models.Transaction.date == target_date
+            models.Transaction.date == target_date,
+            outlet_scope_filter(models.Transaction, scope)
         ).first()
 
         daily_operational = db.query(
@@ -3410,7 +4428,8 @@ def get_dashboard(date: str, db: Session = Depends(get_db)):
                 )
             ).label("mortality_quantity")
         ).filter(
-            models.Transaction.date == target_date
+            models.Transaction.date == target_date,
+            outlet_scope_filter(models.Transaction, scope)
         ).first()
 
         sales = daily_totals.sales or 0
@@ -3425,12 +4444,36 @@ def get_dashboard(date: str, db: Session = Depends(get_db)):
         mortality_quantity = daily_operational.mortality_quantity or 0
 
         # --- Stock ---
-        stock = db.query(models.DailyStock).filter(
-            models.DailyStock.date == target_date
+        stock = apply_outlet_scope(
+            db.query(
+                func.sum(models.DailyStock.expected_closing_weight).label("expected_closing_weight"),
+                func.sum(models.DailyStock.actual_closing_weight).label("actual_closing_weight"),
+                func.sum(models.DailyStock.leakage).label("leakage"),
+                func.count(models.DailyStock.id).label("row_count")
+            ).filter(models.DailyStock.date == target_date),
+            models.DailyStock,
+            scope
         ).first()
-        processed_rows = db.query(models.DailyItemStock).filter(
-            models.DailyItemStock.date == target_date
+        processed_rows = apply_outlet_scope(
+            db.query(models.DailyItemStock).filter(models.DailyItemStock.date == target_date),
+            models.DailyItemStock,
+            scope
         ).count()
+        has_daily_stock = bool(
+            stock
+            and (
+                (stock.row_count or 0) > 0
+                or stock.expected_closing_weight is not None
+                or stock.actual_closing_weight is not None
+                or stock.leakage is not None
+            )
+        )
+        is_processed = int(processed_rows or 0) > 0 or has_daily_stock
+        process_meta = (
+            f"{int(processed_rows or 0):,} item rows processed"
+            if int(processed_rows or 0) > 0
+            else ("Day processed" if has_daily_stock else "No item rows processed")
+        )
 
         # --- Profit (simple approximation) ---
         profit = float(sales or 0) - float(purchase or 0)
@@ -3445,25 +4488,27 @@ def get_dashboard(date: str, db: Session = Depends(get_db)):
         "sales": float(sales or 0),
         "profit": profit,
 
-        "expected_stock": float(stock.expected_closing_weight) if stock else 0,
-        "actual_stock": float(stock.actual_closing_weight) if stock else 0,
-        "leakage": float(stock.leakage) if stock else 0,
+        "expected_stock": float(stock.expected_closing_weight or 0) if stock else 0,
+        "actual_stock": float(stock.actual_closing_weight or 0) if stock else 0,
+        "leakage": float(stock.leakage or 0) if stock else 0,
 
         "receivable": float(receivable),
         "payable": float(payable),
-        "total_outstanding": float(receivable + payable),
+        "total_outstanding": float(receivable - payable),
         "retail_sales": float(retail_sales or 0),
         "dressed_sales_amount": float(dressed_sales_amount or 0),
         "payments_received": float(payments_received or 0),
         "payments_paid": float(payments_paid or 0),
         "mortality_weight": float(mortality_weight or 0),
         "mortality_quantity": float(mortality_quantity or 0),
-        "processed_items_count": int(processed_rows or 0)
+        "processed_items_count": int(processed_rows or 0),
+        "process_status": "Processed" if is_processed else "Pending",
+        "process_meta": process_meta
     }
 
 
 @app.get("/top-debtors")
-def top_debtors(start_date: str | None = None, end_date: str | None = None, db: Session = Depends(get_db)):
+def top_debtors(start_date: str | None = None, end_date: str | None = None, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     start = parse_input_date(start_date) if start_date else None
     end = parse_input_date(end_date) if end_date else None
     if (start_date and not start) or (end_date and not end):
@@ -3477,6 +4522,7 @@ def top_debtors(start_date: str | None = None, end_date: str | None = None, db: 
         models.Transaction,
         models.Transaction.party_id == models.Party.id
     )
+    query = apply_outlet_scope(query, models.Transaction, scope)
 
     if start:
         query = query.filter(models.Transaction.date >= start)
@@ -3501,7 +4547,7 @@ def top_debtors(start_date: str | None = None, end_date: str | None = None, db: 
 
 
 @app.get("/top-payables")
-def top_payables(db: Session = Depends(get_db)):
+def top_payables(db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     balance_expr = func.sum(payable_case())
     rows = db.query(
         models.Party.name,
@@ -3509,7 +4555,8 @@ def top_payables(db: Session = Depends(get_db)):
     ).join(
         models.Transaction,
         models.Transaction.party_id == models.Party.id
-    ).group_by(
+    )
+    rows = apply_outlet_scope(rows, models.Transaction, scope).group_by(
         models.Party.id,
         models.Party.name
     ).having(
@@ -3527,7 +4574,7 @@ def top_payables(db: Session = Depends(get_db)):
 
 
 @app.get("/analytics/trend")
-def get_trend(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def get_trend(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
 
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
@@ -3569,7 +4616,8 @@ def get_trend(start_date: str, end_date: str, db: Session = Depends(get_db)):
             )
         ).label("dressed_billing")
     ).filter(
-        models.Transaction.date.between(start, end)
+        models.Transaction.date.between(start, end),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(models.Transaction.date).order_by(models.Transaction.date).all()
 
     by_date = {
@@ -3598,16 +4646,21 @@ def get_trend(start_date: str, end_date: str, db: Session = Depends(get_db)):
     return trend
 
 @app.get("/analytics/leakage")
-def leakage_trend(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def leakage_trend(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
 
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
     if not start or not end:
         return {"error": "Invalid date format"}
 
-    rows = db.query(models.DailyStock).filter(
-        models.DailyStock.date.between(start, end)
-    ).order_by(models.DailyStock.date).all()
+    rows = apply_outlet_scope(
+        db.query(
+            models.DailyStock.date.label("date"),
+            func.sum(models.DailyStock.leakage).label("leakage")
+        ).filter(models.DailyStock.date.between(start, end)),
+        models.DailyStock,
+        scope
+    ).group_by(models.DailyStock.date).order_by(models.DailyStock.date).all()
 
     return [
         {
@@ -3619,7 +4672,7 @@ def leakage_trend(start_date: str, end_date: str, db: Session = Depends(get_db))
 
 
 @app.get("/analytics/summary")
-def analytics_summary(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def analytics_summary(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
     if not start or not end:
@@ -3657,15 +4710,18 @@ def analytics_summary(start_date: str, end_date: str, db: Session = Depends(get_
             )
         ).label("paid")
     ).filter(
-        models.Transaction.date.between(start, end)
+        models.Transaction.date.between(start, end),
+        outlet_scope_filter(models.Transaction, scope)
     ).first()
 
     sales = Decimal(totals.sales or 0)
     purchase = Decimal(totals.purchase or 0)
     received = Decimal(totals.received or 0)
     paid = Decimal(totals.paid or 0)
-    leakage = db.query(func.sum(models.DailyItemStock.leakage)).filter(
-        models.DailyItemStock.date.between(start, end)
+    leakage = apply_outlet_scope(
+        db.query(func.sum(models.DailyItemStock.leakage)).filter(models.DailyItemStock.date.between(start, end)),
+        models.DailyItemStock,
+        scope
     ).scalar() or 0
 
     return {
@@ -3680,7 +4736,7 @@ def analytics_summary(start_date: str, end_date: str, db: Session = Depends(get_
 
 
 @app.get("/analytics/item-volume")
-def item_volume(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def item_volume(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
     if not start or not end:
@@ -3702,7 +4758,8 @@ def item_volume(start_date: str, end_date: str, db: Session = Depends(get_db)):
         ).label("sales_kg")
     ).filter(
         models.Transaction.date.between(start, end),
-        models.Transaction.item_type.isnot(None)
+        models.Transaction.item_type.isnot(None),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.item_type
     ).order_by(
@@ -3720,7 +4777,7 @@ def item_volume(start_date: str, end_date: str, db: Session = Depends(get_db)):
 
 
 @app.get("/analytics/payment-modes")
-def payment_modes(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def payment_modes(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
     if not start or not end:
@@ -3743,7 +4800,8 @@ def payment_modes(start_date: str, end_date: str, db: Session = Depends(get_db))
         ).label("paid")
     ).filter(
         models.Transaction.date.between(start, end),
-        models.Transaction.type == "PAYMENT"
+        models.Transaction.type == "PAYMENT",
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         mode
     ).all()
@@ -3760,42 +4818,28 @@ def payment_modes(start_date: str, end_date: str, db: Session = Depends(get_db))
 
 
 @app.get("/retail-bills/next-number")
-def next_retail_bill_number(date: str, db: Session = Depends(get_db)):
+def next_retail_bill_number(date: str, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(date)
     if not target_date:
         return {"error": "Invalid date format"}
-
-    bill_numbers = db.query(models.RetailBill.bill_number).filter(
-        models.RetailBill.date == target_date
-    ).all()
-    receipt_numbers = db.query(models.PaymentReceipt.receipt_number).filter(
-        models.PaymentReceipt.date == target_date
-    ).all()
-
-    max_number = 0
-    for row in list(bill_numbers) + list(receipt_numbers):
-        raw_value = getattr(row, "bill_number", None) or getattr(row, "receipt_number", None)
-        digits = "".join(char for char in str(raw_value or "") if char.isdigit())
-        if digits:
-            max_number = max(max_number, int(digits))
-
-    return {"bill_number": str(max_number + 1)}
+    return {"bill_number": current_shared_document_number(target_date, db, current_outlet.id)}
 
 
 @app.get("/retail-bills")
-def list_retail_bills(date: str = None, db: Session = Depends(get_db)):
+def list_retail_bills(date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     query = db.query(models.RetailBill).order_by(
         models.RetailBill.date.desc(),
         models.RetailBill.created_at.desc()
-    )
+    ).filter(models.RetailBill.outlet_id == current_outlet.id)
 
     if date:
         target_date = parse_input_date(date)
         if not target_date:
             return {"error": "Invalid date format"}
         query = query.filter(models.RetailBill.date == target_date)
-
-    bills = query.limit(50).all()
+        bills = query.all()
+    else:
+        bills = query.limit(50).all()
     bill_ids = [bill.id for bill in bills]
     mode_map = {}
     if bill_ids:
@@ -3806,10 +4850,12 @@ def list_retail_bills(date: str = None, db: Session = Depends(get_db)):
             models.RetailBillItem.bill_id.in_(bill_ids)
         ).all()
         for row in item_rows:
-            if str(row.line_type or "STANDARD").upper() == "DRESSED":
-                mode_map[row.bill_id] = "dressed"
+            current_mode = mode_map.get(row.bill_id)
+            row_mode = "dressed" if str(row.line_type or "STANDARD").upper() == "DRESSED" else "regular"
+            if current_mode and current_mode != row_mode:
+                mode_map[row.bill_id] = "both"
             else:
-                mode_map.setdefault(row.bill_id, "regular")
+                mode_map.setdefault(row.bill_id, row_mode)
 
     return {
         "results": [
@@ -3830,42 +4876,28 @@ def list_retail_bills(date: str = None, db: Session = Depends(get_db)):
 
 
 @app.get("/payment-receipts/next-number")
-def next_payment_receipt_number(date: str, db: Session = Depends(get_db)):
+def next_payment_receipt_number(date: str, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(date)
     if not target_date:
         return {"error": "Invalid date format"}
-
-    receipt_numbers = db.query(models.PaymentReceipt.receipt_number).filter(
-        models.PaymentReceipt.date == target_date
-    ).all()
-    bill_numbers = db.query(models.RetailBill.bill_number).filter(
-        models.RetailBill.date == target_date
-    ).all()
-
-    max_number = 0
-    for row in list(receipt_numbers) + list(bill_numbers):
-        raw_value = getattr(row, "receipt_number", None) or getattr(row, "bill_number", None)
-        digits = "".join(char for char in str(raw_value or "") if char.isdigit())
-        if digits:
-            max_number = max(max_number, int(digits))
-
-    return {"receipt_number": str(max_number + 1)}
+    return {"receipt_number": current_shared_document_number(target_date, db, current_outlet.id)}
 
 
 @app.get("/payment-receipts")
-def list_payment_receipts(date: str = None, db: Session = Depends(get_db)):
+def list_payment_receipts(date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     query = db.query(models.PaymentReceipt).order_by(
         models.PaymentReceipt.date.desc(),
         models.PaymentReceipt.created_at.desc()
-    )
+    ).filter(models.PaymentReceipt.outlet_id == current_outlet.id)
 
     if date:
         target_date = parse_input_date(date)
         if not target_date:
             return {"error": "Invalid date format"}
         query = query.filter(models.PaymentReceipt.date == target_date)
-
-    receipts = query.limit(50).all()
+        receipts = query.all()
+    else:
+        receipts = query.limit(50).all()
 
     return {
         "results": [
@@ -3884,11 +4916,11 @@ def list_payment_receipts(date: str = None, db: Session = Depends(get_db)):
 
 
 @app.get("/dressed-stock")
-def list_dressed_stock(date: str | None = None, db: Session = Depends(get_db)):
+def list_dressed_stock(date: str | None = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     query = db.query(models.DressedStockEntry).order_by(
         models.DressedStockEntry.date.desc(),
         models.DressedStockEntry.created_at.desc()
-    )
+    ).filter(models.DressedStockEntry.outlet_id == current_outlet.id)
 
     target_date = parse_input_date(date) if date else None
     if date and not target_date:
@@ -3929,7 +4961,7 @@ def list_dressed_stock(date: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.post("/dressed-stock")
-def create_dressed_stock_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db)):
+def create_dressed_stock_entries(payload: dict = Body(...), input_date: str = None, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(input_date)
     if not target_date:
         return {"error": "Select working date"}
@@ -3958,6 +4990,7 @@ def create_dressed_stock_entries(payload: dict = Body(...), input_date: str = No
 
             db.add(models.DressedStockEntry(
                 date=target_date,
+                outlet_id=current_outlet.id,
                 item_name=item_name,
                 live_quantity=live_quantity if live_quantity > 0 else None,
                 live_weight=live_weight if live_weight > 0 else None,
@@ -3981,20 +5014,24 @@ def create_dressed_stock_entries(payload: dict = Body(...), input_date: str = No
 
 
 @app.get("/payment-receipts/{receipt_id}")
-def get_payment_receipt(receipt_id: UUID, db: Session = Depends(get_db)):
-    receipt = db.query(models.PaymentReceipt).filter(models.PaymentReceipt.id == receipt_id).first()
+def get_payment_receipt(receipt_id: UUID, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
+    receipt = db.query(models.PaymentReceipt).filter(
+        models.PaymentReceipt.id == receipt_id,
+        models.PaymentReceipt.outlet_id == current_outlet.id
+    ).first()
     if not receipt:
         return {"error": "Payment receipt not found"}
     txns = db.query(models.Transaction).filter(models.Transaction.party_id == receipt.party_id).order_by(
         models.Transaction.date.asc(),
         models.Transaction.created_at.asc()
     ).all()
-    balance_after, _ = build_ledger(txns)
+    txns = [txn for txn in txns if txn.outlet_id == current_outlet.id]
+    balance_after, _ = build_ledger(db, txns)
     return serialize_payment_receipt(receipt, balance_after)
 
 
 @app.post("/payment-receipts")
-def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_db)):
+def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(payload.get("date"))
     if not target_date:
         return {"error": "Invalid receipt date"}
@@ -4011,27 +5048,12 @@ def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_
     if not direction:
         return {"error": "Direction must be RECEIVED or PAID"}
 
-    receipt_number = str(payload.get("receipt_number") or "").strip()
-    if not receipt_number:
-        next_number = next_payment_receipt_number(str(target_date), db)
-        receipt_number = next_number.get("receipt_number", "1")
-
-    existing = db.query(models.PaymentReceipt).filter(
-        models.PaymentReceipt.date == target_date,
-        models.PaymentReceipt.receipt_number == receipt_number
-    ).first()
-    existing_bill = db.query(models.RetailBill).filter(
-        models.RetailBill.date == target_date,
-        models.RetailBill.bill_number == receipt_number
-    ).first()
-    if existing or existing_bill:
-        return {"error": "Receipt number already exists"}
+    receipt_number = reserve_shared_document_number(target_date, db, current_outlet.id)
 
     party_phone = str(payload.get("party_phone") or "").strip()
     party_address = str(payload.get("party_address") or "").strip()
     cashier_name = str(payload.get("cashier_name") or "admin").strip()
     payment_mode = str(payload.get("payment_mode") or "Cash").strip()
-    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
     notes = str(payload.get("notes") or "").strip()
 
     party_id = get_or_create_party(db, party_name, "BOTH", {}, phone=party_phone, address=party_address)
@@ -4040,6 +5062,7 @@ def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_
         id=uuid4(),
         receipt_number=receipt_number,
         date=target_date,
+        outlet_id=current_outlet.id,
         party_id=party_id,
         party_name=party_name,
         party_phone=party_phone or None,
@@ -4055,6 +5078,7 @@ def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_
 
     db.add(models.Transaction(
         date=target_date,
+        outlet_id=current_outlet.id,
         party_id=party_id,
         type="PAYMENT",
         category=direction,
@@ -4071,17 +5095,23 @@ def create_payment_receipt(payload: dict = Body(...), db: Session = Depends(get_
         return {"error": "Saving payment receipt failed", "details": str(e)}
 
     db.refresh(receipt)
-    txns = db.query(models.Transaction).filter(models.Transaction.party_id == party_id).order_by(
+    txns = db.query(models.Transaction).filter(
+        models.Transaction.party_id == party_id,
+        models.Transaction.outlet_id == current_outlet.id
+    ).order_by(
         models.Transaction.date.asc(),
         models.Transaction.created_at.asc()
     ).all()
-    balance_after, _ = build_ledger(txns)
+    balance_after, _ = build_ledger(db, txns)
     return {"receipt": serialize_payment_receipt(receipt, balance_after)}
 
 
 @app.put("/payment-receipts/{receipt_id}")
-def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Session = Depends(get_db), user: models.User = Depends(require_owner)):
-    receipt = db.query(models.PaymentReceipt).filter(models.PaymentReceipt.id == receipt_id).first()
+def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Session = Depends(get_db), user: models.User = Depends(require_owner), current_outlet: models.Outlet = Depends(get_current_outlet)):
+    receipt = db.query(models.PaymentReceipt).filter(
+        models.PaymentReceipt.id == receipt_id,
+        models.PaymentReceipt.outlet_id == current_outlet.id
+    ).first()
     if not receipt:
         return {"error": "Payment receipt not found"}
 
@@ -4106,10 +5136,14 @@ def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Sess
         return {"error": "Receipt number is required"}
 
     existing = db.query(models.PaymentReceipt).filter(
+        models.PaymentReceipt.date == target_date,
+        models.PaymentReceipt.outlet_id == current_outlet.id,
         models.PaymentReceipt.receipt_number == receipt_number,
         models.PaymentReceipt.id != receipt.id
     ).first()
     existing_bill = db.query(models.RetailBill).filter(
+        models.RetailBill.date == target_date,
+        models.RetailBill.outlet_id == current_outlet.id,
         models.RetailBill.bill_number == receipt_number
     ).first()
     if existing or existing_bill:
@@ -4119,13 +5153,13 @@ def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Sess
     party_address = str(payload.get("party_address") or "").strip()
     cashier_name = str(payload.get("cashier_name") or "admin").strip()
     payment_mode = str(payload.get("payment_mode") or "Cash").strip()
-    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
     notes = str(payload.get("notes") or "").strip()
 
     party_id = get_or_create_party(db, party_name, "BOTH", {}, phone=party_phone, address=party_address)
 
     receipt.receipt_number = receipt_number
     receipt.date = target_date
+    receipt.outlet_id = current_outlet.id
     receipt.party_id = party_id
     receipt.party_name = party_name
     receipt.party_phone = party_phone or None
@@ -4142,6 +5176,7 @@ def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Sess
 
     db.add(models.Transaction(
         date=target_date,
+        outlet_id=current_outlet.id,
         party_id=party_id,
         type="PAYMENT",
         category=direction,
@@ -4158,17 +5193,23 @@ def update_payment_receipt(receipt_id: UUID, payload: dict = Body(...), db: Sess
         return {"error": "Updating payment receipt failed", "details": str(e)}
 
     db.refresh(receipt)
-    txns = db.query(models.Transaction).filter(models.Transaction.party_id == party_id).order_by(
+    txns = db.query(models.Transaction).filter(
+        models.Transaction.party_id == party_id,
+        models.Transaction.outlet_id == current_outlet.id
+    ).order_by(
         models.Transaction.date.asc(),
         models.Transaction.created_at.asc()
     ).all()
-    balance_after, _ = build_ledger(txns)
+    balance_after, _ = build_ledger(db, txns)
     return {"receipt": serialize_payment_receipt(receipt, balance_after)}
 
 
 @app.get("/retail-bills/{bill_id}")
-def get_retail_bill(bill_id: UUID, db: Session = Depends(get_db)):
-    bill = db.query(models.RetailBill).filter(models.RetailBill.id == bill_id).first()
+def get_retail_bill(bill_id: UUID, db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
+    bill = db.query(models.RetailBill).filter(
+        models.RetailBill.id == bill_id,
+        models.RetailBill.outlet_id == current_outlet.id
+    ).first()
     if not bill:
         return {"error": "Retail bill not found"}
 
@@ -4177,12 +5218,12 @@ def get_retail_bill(bill_id: UUID, db: Session = Depends(get_db)):
     ).order_by(models.RetailBillItem.line_order.asc()).all()
 
     data = serialize_retail_bill(bill, items)
-    data["party_balance"] = retail_party_balance_after(db, bill.party_id)
+    data["party_balance"] = retail_party_balance_after(db, bill.party_id, current_outlet.id)
     return data
 
 
 @app.post("/retail-bills")
-def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db)):
+def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db), current_outlet: models.Outlet = Depends(get_current_outlet)):
     target_date = parse_input_date(payload.get("date"))
     if not target_date:
         return {"error": "Invalid bill date"}
@@ -4191,21 +5232,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     if not raw_items:
         return {"error": "Add at least one retail item"}
 
-    bill_number = str(payload.get("bill_number") or "").strip()
-    if not bill_number:
-        next_number = next_retail_bill_number(str(target_date), db)
-        bill_number = next_number.get("bill_number", "1")
-
-    existing = db.query(models.RetailBill).filter(
-        models.RetailBill.date == target_date,
-        models.RetailBill.bill_number == bill_number
-    ).first()
-    existing_receipt = db.query(models.PaymentReceipt).filter(
-        models.PaymentReceipt.date == target_date,
-        models.PaymentReceipt.receipt_number == bill_number
-    ).first()
-    if existing or existing_receipt:
-        return {"error": "Bill number already exists"}
+    bill_number = reserve_shared_document_number(target_date, db, current_outlet.id)
 
     customer_name = str(payload.get("customer_name") or "").strip()
     customer_phone = str(payload.get("customer_phone") or "").strip()
@@ -4216,7 +5243,6 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     ice_amount = parse_decimal(payload.get("ice_amount"))
     raw_paid_amount = payload.get("paid_amount")
     paid_amount = parse_decimal(raw_paid_amount)
-    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
 
     party_id = None
     if customer_name:
@@ -4235,6 +5261,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
         line_type = str(raw_item.get("line_type") or "STANDARD").strip().upper()
         if line_type not in ["STANDARD", "DRESSED"]:
             line_type = "STANDARD"
+        source_item_type = resolve_stock_source_type(item_name, raw_item.get("source_item_type") or "")
         quantity = parse_decimal(raw_item.get("nag", raw_item.get("quantity")))
         rate = parse_decimal(raw_item.get("rate"))
         unit = str(raw_item.get("unit") or "KGS").strip().upper()
@@ -4267,6 +5294,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
             "line_order": index,
             "item_name": item_name,
             "line_type": line_type,
+            "source_item_type": source_item_type,
             "quantity": quantity,
             "unit": unit,
             "weight": weight,
@@ -4283,11 +5311,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
 
     total_amount += ice_amount
 
-    if payment_breakdown:
-        paid_amount = sum((entry["amount"] for entry in payment_breakdown), Decimal("0"))
-        if paid_amount > total_amount:
-            return {"error": "Split payment total cannot exceed bill total"}
-    elif raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
+    if raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
         paid_amount = total_amount
 
     if paid_amount < 0:
@@ -4300,27 +5324,31 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     if outstanding_amount > 0 and not customer_name:
         return {"error": "Customer name is required for credit retail bills"}
 
-    if not payment_breakdown and paid_amount > 0:
-        payment_breakdown = [{"mode": payment_mode or "Cash", "amount": paid_amount}]
+    try:
+        payment_breakdown = normalize_retail_payment_breakdown(
+            payload.get("payment_breakdown"),
+            payment_mode,
+            paid_amount
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
-    payment_mode = build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, payment_mode)
+    payment_mode = summarize_retail_payment_mode(payment_breakdown, outstanding_amount)
 
-    transaction_party_id = party_id if outstanding_amount > 0 else None
+    transaction_party_id = party_id if party_id else None
 
     bill = models.RetailBill(
         id=uuid4(),
         bill_number=bill_number,
         date=target_date,
+        outlet_id=current_outlet.id,
         party_id=party_id,
         customer_name=customer_name or None,
         customer_phone=customer_phone or None,
         customer_address=customer_address or None,
         cashier_name=cashier_name or "admin",
         payment_mode=payment_mode,
-        payment_breakdown=json.dumps([
-            {"mode": entry["mode"], "amount": float(entry["amount"])}
-            for entry in payment_breakdown
-        ]) if payment_breakdown else None,
+        payment_breakdown=json.dumps(serialize_retail_payment_breakdown(payment_breakdown)) if payment_breakdown else None,
         total_quantity=total_quantity,
         total_weight=total_weight,
         ice_amount=ice_amount,
@@ -4338,6 +5366,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
             line_order=item["line_order"],
             item_name=item["item_name"],
             line_type=item["line_type"],
+            source_item_type=item["source_item_type"] or None,
             quantity=item["quantity"],
             unit=item["unit"],
             weight=item["weight"],
@@ -4347,10 +5376,11 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
         transaction_category = "RETAIL DRESSED" if item["line_type"] == "DRESSED" else "RETAIL"
         db.add(models.Transaction(
             date=target_date,
+            outlet_id=current_outlet.id,
             party_id=transaction_party_id,
             type="SALE",
             category=transaction_category,
-            item_type=item["item_name"],
+            item_type=item["source_item_type"] or item["item_name"],
             quantity=item["quantity"],
             weight=item["weight"],
             rate=item["rate"],
@@ -4363,6 +5393,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     if ice_amount > 0:
         db.add(models.Transaction(
             date=target_date,
+            outlet_id=current_outlet.id,
             party_id=transaction_party_id,
             type="SALE",
             category="RETAIL DRESSED" if any(item["line_type"] == "DRESSED" for item in normalized_items) else "RETAIL",
@@ -4377,29 +5408,24 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
         ))
 
     if paid_amount > 0 and outstanding_amount > 0:
-        payment_entries = payment_breakdown or [{"mode": payment_mode, "amount": paid_amount}]
-        for payment_index, payment_entry in enumerate(payment_entries, start=1):
-            db.add(models.Transaction(
-                date=target_date,
-                party_id=party_id,
-                type="PAYMENT",
-                category="RECEIVED",
-                item_type="Retail Bill Payment",
-                quantity=Decimal("0"),
-                weight=0,
-                rate=0,
-                amount=payment_entry["amount"],
-                payment_mode=payment_entry["mode"],
-                bill_number=bill_number,
-                source_ref=f"retail-payment:{bill.id}:{payment_index}"
-            ))
+        db.add(models.Transaction(
+            date=target_date,
+            outlet_id=current_outlet.id,
+            party_id=party_id,
+            type="PAYMENT",
+            category="RECEIVED",
+            item_type="Retail Bill Payment",
+            quantity=Decimal("0"),
+            weight=0,
+            rate=0,
+            amount=paid_amount,
+            payment_mode=payment_mode,
+            bill_number=bill_number,
+            source_ref=f"retail-payment:{bill.id}"
+        ))
 
-    recompute_dressed_stock_remaining(db, target_date)
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        return {"error": "Saving retail bill failed", "details": str(e)}
+    recompute_dressed_stock_remaining(db, target_date, current_outlet.id)
+    db.commit()
     db.refresh(bill)
 
     saved_items = db.query(models.RetailBillItem).filter(
@@ -4407,7 +5433,7 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
     ).order_by(models.RetailBillItem.line_order.asc()).all()
 
     bill_data = serialize_retail_bill(bill, saved_items)
-    bill_data["party_balance"] = retail_party_balance_after(db, bill.party_id)
+    bill_data["party_balance"] = retail_party_balance_after(db, bill.party_id, current_outlet.id)
 
     return {
         "status": "success",
@@ -4417,8 +5443,11 @@ def create_retail_bill(payload: dict = Body(...), db: Session = Depends(get_db))
 
 
 @app.put("/retail-bills/{bill_id}")
-def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = Depends(get_db), user: models.User = Depends(require_owner)):
-    bill = db.query(models.RetailBill).filter(models.RetailBill.id == bill_id).first()
+def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = Depends(get_db), user: models.User = Depends(require_owner), current_outlet: models.Outlet = Depends(get_current_outlet)):
+    bill = db.query(models.RetailBill).filter(
+        models.RetailBill.id == bill_id,
+        models.RetailBill.outlet_id == current_outlet.id
+    ).first()
     if not bill:
         return {"error": "Retail bill not found"}
 
@@ -4436,11 +5465,13 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
 
     existing = db.query(models.RetailBill).filter(
         models.RetailBill.date == target_date,
+        models.RetailBill.outlet_id == current_outlet.id,
         models.RetailBill.bill_number == bill_number,
         models.RetailBill.id != bill.id
     ).first()
     existing_receipt = db.query(models.PaymentReceipt).filter(
         models.PaymentReceipt.date == target_date,
+        models.PaymentReceipt.outlet_id == current_outlet.id,
         models.PaymentReceipt.receipt_number == bill_number
     ).first()
     if existing or existing_receipt:
@@ -4455,7 +5486,6 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     ice_amount = parse_decimal(payload.get("ice_amount"))
     raw_paid_amount = payload.get("paid_amount")
     paid_amount = parse_decimal(raw_paid_amount)
-    payment_breakdown = normalize_payment_breakdown(payload.get("payment_breakdown"))
 
     party_id = None
     if customer_name:
@@ -4474,6 +5504,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
         line_type = str(raw_item.get("line_type") or "STANDARD").strip().upper()
         if line_type not in ["STANDARD", "DRESSED"]:
             line_type = "STANDARD"
+        source_item_type = resolve_stock_source_type(item_name, raw_item.get("source_item_type") or "")
         quantity = parse_decimal(raw_item.get("nag", raw_item.get("quantity")))
         rate = parse_decimal(raw_item.get("rate"))
         unit = str(raw_item.get("unit") or "KGS").strip().upper()
@@ -4506,6 +5537,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
             "line_order": index,
             "item_name": item_name,
             "line_type": line_type,
+            "source_item_type": source_item_type,
             "quantity": quantity,
             "unit": unit,
             "weight": weight,
@@ -4522,11 +5554,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
 
     total_amount += ice_amount
 
-    if payment_breakdown:
-        paid_amount = sum((entry["amount"] for entry in payment_breakdown), Decimal("0"))
-        if paid_amount > total_amount:
-            return {"error": "Split payment total cannot exceed bill total"}
-    elif raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
+    if raw_paid_amount in [None, ""] and payment_mode.strip().upper() != "CREDIT":
         paid_amount = total_amount
 
     if paid_amount < 0:
@@ -4539,27 +5567,31 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     if outstanding_amount > 0 and not customer_name:
         return {"error": "Customer name is required for credit retail bills"}
 
-    if not payment_breakdown and paid_amount > 0:
-        payment_breakdown = [{"mode": payment_mode or "Cash", "amount": paid_amount}]
+    try:
+        payment_breakdown = normalize_retail_payment_breakdown(
+            payload.get("payment_breakdown"),
+            payment_mode,
+            paid_amount
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
-    payment_mode = build_payment_mode_label(payment_breakdown, paid_amount, outstanding_amount, payment_mode)
+    payment_mode = summarize_retail_payment_mode(payment_breakdown, outstanding_amount)
 
-    transaction_party_id = party_id if outstanding_amount > 0 else None
+    transaction_party_id = party_id if party_id else None
 
     previous_date = bill.date
 
     bill.bill_number = bill_number
     bill.date = target_date
+    bill.outlet_id = current_outlet.id
     bill.party_id = party_id
     bill.customer_name = customer_name or None
     bill.customer_phone = customer_phone or None
     bill.customer_address = customer_address or None
     bill.cashier_name = cashier_name or "admin"
     bill.payment_mode = payment_mode
-    bill.payment_breakdown = json.dumps([
-        {"mode": entry["mode"], "amount": float(entry["amount"])}
-        for entry in payment_breakdown
-    ]) if payment_breakdown else None
+    bill.payment_breakdown = json.dumps(serialize_retail_payment_breakdown(payment_breakdown)) if payment_breakdown else None
     bill.total_quantity = total_quantity
     bill.total_weight = total_weight
     bill.ice_amount = ice_amount
@@ -4575,7 +5607,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     db.query(models.Transaction).filter(
         or_(
             models.Transaction.source_ref.like(f"retail-bill:{bill.id}:%"),
-            models.Transaction.source_ref.like(f"retail-payment:{bill.id}%")
+            models.Transaction.source_ref == f"retail-payment:{bill.id}"
         )
     ).delete(synchronize_session=False)
 
@@ -4585,6 +5617,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
             line_order=item["line_order"],
             item_name=item["item_name"],
             line_type=item["line_type"],
+            source_item_type=item["source_item_type"] or None,
             quantity=item["quantity"],
             unit=item["unit"],
             weight=item["weight"],
@@ -4594,10 +5627,11 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
         transaction_category = "RETAIL DRESSED" if item["line_type"] == "DRESSED" else "RETAIL"
         db.add(models.Transaction(
             date=target_date,
+            outlet_id=current_outlet.id,
             party_id=transaction_party_id,
             type="SALE",
             category=transaction_category,
-            item_type=item["item_name"],
+            item_type=item["source_item_type"] or item["item_name"],
             quantity=item["quantity"],
             weight=item["weight"],
             rate=item["rate"],
@@ -4610,6 +5644,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     if ice_amount > 0:
         db.add(models.Transaction(
             date=target_date,
+            outlet_id=current_outlet.id,
             party_id=transaction_party_id,
             type="SALE",
             category="RETAIL DRESSED" if any(item["line_type"] == "DRESSED" for item in normalized_items) else "RETAIL",
@@ -4624,26 +5659,25 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
         ))
 
     if paid_amount > 0 and outstanding_amount > 0:
-        payment_entries = payment_breakdown or [{"mode": payment_mode, "amount": paid_amount}]
-        for payment_index, payment_entry in enumerate(payment_entries, start=1):
-            db.add(models.Transaction(
-                date=target_date,
-                party_id=party_id,
-                type="PAYMENT",
-                category="RECEIVED",
-                item_type="Retail Bill Payment",
-                quantity=Decimal("0"),
-                weight=0,
-                rate=0,
-                amount=payment_entry["amount"],
-                payment_mode=payment_entry["mode"],
-                bill_number=bill_number,
-                source_ref=f"retail-payment:{bill.id}:{payment_index}"
-            ))
+        db.add(models.Transaction(
+            date=target_date,
+            outlet_id=current_outlet.id,
+            party_id=party_id,
+            type="PAYMENT",
+            category="RECEIVED",
+            item_type="Retail Bill Payment",
+            quantity=Decimal("0"),
+            weight=0,
+            rate=0,
+            amount=paid_amount,
+            payment_mode=payment_mode,
+            bill_number=bill_number,
+            source_ref=f"retail-payment:{bill.id}"
+        ))
 
-    recompute_dressed_stock_remaining(db, previous_date)
+    recompute_dressed_stock_remaining(db, previous_date, current_outlet.id)
     if previous_date != target_date:
-        recompute_dressed_stock_remaining(db, target_date)
+        recompute_dressed_stock_remaining(db, target_date, current_outlet.id)
 
     try:
         db.commit()
@@ -4657,7 +5691,7 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
     ).order_by(models.RetailBillItem.line_order.asc()).all()
 
     bill_data = serialize_retail_bill(bill, saved_items)
-    bill_data["party_balance"] = retail_party_balance_after(db, bill.party_id)
+    bill_data["party_balance"] = retail_party_balance_after(db, bill.party_id, current_outlet.id)
 
     return {
         "status": "success",
@@ -4667,7 +5701,16 @@ def update_retail_bill(bill_id: UUID, payload: dict = Body(...), db: Session = D
 
 
 @app.get("/daily-sheet")
-def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_db), user: models.User = Depends(require_owner)):
+def daily_sheet(
+    date: str,
+    sheet_type: str = "stock",
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+    scope=Depends(get_outlet_scope)
+):
+    if scope["mode"] == "all":
+        return {"error": "Select one outlet for Daily Sheet"}
+
     target_date = parse_input_date(date)
     if not target_date:
         return {"error": "Invalid date format"}
@@ -4676,169 +5719,162 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
 
     if sheet_type in ["vendor", "dealer"]:
         if sheet_type == "vendor":
-            non_retail_sale = (
-                (models.Transaction.type == "SALE") &
-                or_(
-                    models.Transaction.category.is_(None),
-                    ~models.Transaction.category.in_(["RETAIL", "RETAIL DRESSED"])
-                )
+            party_type_filter = or_(
+                models.Party.type == "VENDOR",
+                models.Party.type == "BOTH"
             )
             received_payment = (
                 (models.Transaction.type == "PAYMENT") &
-                (models.Transaction.category == "RECEIVED") &
-                or_(
-                    models.Transaction.item_type.is_(None),
-                    models.Transaction.item_type != "Retail Bill Payment"
-                )
+                (models.Transaction.category == "RECEIVED")
             )
             relevant_filter = (
-                non_retail_sale |
+                (models.Transaction.type == "SALE") |
                 ((models.Transaction.type == "OPENING") & (models.Transaction.category == "RECEIVABLE")) |
                 received_payment
             )
-            old_case = case(
-                (
-                    (models.Transaction.date < target_date) & non_retail_sale,
-                    models.Transaction.amount
-                ),
-                (
-                    (models.Transaction.date <= target_date) & (models.Transaction.type == "OPENING") & (models.Transaction.category == "RECEIVABLE"),
-                    models.Transaction.amount
-                ),
-                (
-                    (models.Transaction.date < target_date) & (models.Transaction.type == "PAYMENT") & (models.Transaction.category == "RECEIVED"),
-                    -models.Transaction.amount
-                ),
-                else_=0
-            )
-            purchases_case = case(
-                (
-                    (models.Transaction.date == target_date) & non_retail_sale,
-                    models.Transaction.amount
-                ),
-                else_=0
-            )
-            payment_case = case(
-                (
-                    (models.Transaction.date == target_date) & received_payment,
-                    models.Transaction.amount
-                ),
-                else_=0
-            )
+
+            def include_txn(txn):
+                return (
+                    (txn.type == "SALE") or
+                    (txn.type == "OPENING" and (txn.category or "").upper() == "RECEIVABLE") or
+                    (txn.type == "PAYMENT" and (txn.category or "").upper() == "RECEIVED")
+                )
+
+            def opening_belongs_to_old(txn, current_date):
+                return txn.type == "OPENING" and (txn.category or "").upper() == "RECEIVABLE" and txn.date <= current_date
+
+            def running_delta(txn, settled_keys):
+                return receivable_delta(txn, settled_keys)
+
+            def day_purchase_amount(txn, current_date, settled_keys):
+                if txn.date != current_date or txn.type != "SALE":
+                    return Decimal("0")
+                return max(receivable_delta(txn, settled_keys), Decimal("0"))
+
+            def day_payment_amount(txn, current_date, settled_keys):
+                return Decimal(txn.amount or 0) if txn.date == current_date and (txn.type == "PAYMENT") and ((txn.category or "").upper() == "RECEIVED") else Decimal("0")
         else:
+            party_type_filter = or_(
+                models.Party.type == "DEALER",
+                models.Party.type == "BOTH"
+            )
             relevant_filter = (
                 (models.Transaction.type == "PURCHASE") |
                 ((models.Transaction.type == "OPENING") & (models.Transaction.category == "PAYABLE")) |
                 ((models.Transaction.type == "PAYMENT") & (models.Transaction.category == "PAID"))
             )
-            old_case = case(
-                (
-                    (models.Transaction.date < target_date) & (models.Transaction.type == "PURCHASE"),
-                    models.Transaction.amount
-                ),
-                (
-                    (models.Transaction.date <= target_date) & (models.Transaction.type == "OPENING") & (models.Transaction.category == "PAYABLE"),
-                    models.Transaction.amount
-                ),
-                (
-                    (models.Transaction.date < target_date) & (models.Transaction.type == "PAYMENT") & (models.Transaction.category == "PAID"),
-                    -models.Transaction.amount
-                ),
-                else_=0
-            )
-            purchases_case = case(
-                (
-                    (models.Transaction.date == target_date) & (models.Transaction.type == "PURCHASE"),
-                    models.Transaction.amount
-                ),
-                else_=0
-            )
-            payment_case = case(
-                (
-                    (models.Transaction.date == target_date) & (models.Transaction.type == "PAYMENT") & (models.Transaction.category == "PAID"),
-                    models.Transaction.amount
-                ),
-                else_=0
-            )
+            def include_txn(txn):
+                return (
+                    txn.type == "PURCHASE" or
+                    (txn.type == "OPENING" and (txn.category or "").upper() == "PAYABLE") or
+                    (txn.type == "PAYMENT" and (txn.category or "").upper() == "PAID")
+                )
 
-        rows = db.query(
+            def opening_belongs_to_old(txn, current_date):
+                return txn.type == "OPENING" and (txn.category or "").upper() == "PAYABLE" and txn.date <= current_date
+
+            def running_delta(txn, settled_keys):
+                return payable_delta(txn)
+
+            def day_purchase_amount(txn, current_date, settled_keys):
+                return Decimal(txn.amount or 0) if txn.date == current_date and txn.type == "PURCHASE" else Decimal("0")
+
+            def day_payment_amount(txn, current_date, settled_keys):
+                return Decimal(txn.amount or 0) if txn.date == current_date and txn.type == "PAYMENT" and (txn.category or "").upper() == "PAID" else Decimal("0")
+
+        party_txn_rows = db.query(
+            models.Party.id.label("party_id"),
             models.Party.name.label("party_name"),
-            func.sum(old_case).label("old_balance"),
-            func.sum(purchases_case).label("purchases"),
-            func.sum(payment_case).label("payment")
+            models.Transaction
         ).join(
             models.Transaction,
             models.Transaction.party_id == models.Party.id
         ).filter(
-            relevant_filter
-        ).group_by(
-            models.Party.id,
-            models.Party.name
+            relevant_filter,
+            party_type_filter,
+            models.Transaction.date <= target_date,
+            outlet_scope_filter(models.Transaction, scope)
         ).order_by(
-            models.Party.name.asc()
+            models.Party.name.asc(),
+            models.Transaction.date.asc(),
+            models.Transaction.created_at.asc()
         ).all()
 
-        result_rows = []
-        total_old = Decimal("0")
-        total_purchases = Decimal("0")
-        total_payment = Decimal("0")
-        total_balance = Decimal("0")
+        grouped_parties = {}
+        for party_id, party_name, txn in party_txn_rows:
+            bucket = grouped_parties.setdefault(party_id, {"party_name": party_name, "txns": []})
+            bucket["txns"].append(txn)
 
-        for row in rows:
-            old_balance = Decimal(row.old_balance or 0)
-            purchases = Decimal(row.purchases or 0)
-            payment = Decimal(row.payment or 0)
-            balance = old_balance + purchases - payment
-
-            if old_balance == 0 and purchases == 0 and payment == 0 and balance == 0:
-                continue
-
-            result_rows.append(format_balance_row(row.party_name, old_balance, purchases, payment, balance))
-            total_old += old_balance
-            total_purchases += purchases
-            total_payment += payment
-            total_balance += balance
+        sheet_data = build_balance_sheet_rows_from_ledger(
+            db=db,
+            grouped_parties=grouped_parties,
+            target_date=target_date,
+            include_txn=include_txn,
+            running_delta=running_delta,
+            day_purchase_amount=day_purchase_amount,
+            day_payment_amount=day_payment_amount,
+            opening_belongs_to_old=opening_belongs_to_old
+        )
 
         return {
             "date": str(target_date),
             "sheet_type": sheet_type,
             "title": "Vendor Balance Sheet" if sheet_type == "vendor" else "Dealer Balance Sheet",
-            "rows": result_rows,
-            "totals": format_balance_row("TOTAL", total_old, total_purchases, total_payment, total_balance)
+            "rows": sheet_data["rows"],
+            "totals": sheet_data["totals"]
         }
 
-    rates = latest_item_rates(db, target_date)
+    rates = latest_item_rates(db, target_date, scope)
 
-    processed_rows = db.query(models.DailyItemStock).filter(
-        models.DailyItemStock.date == target_date
+    processed_rows = apply_outlet_scope(
+        db.query(models.DailyItemStock).filter(
+            models.DailyItemStock.date == target_date,
+            models.DailyItemStock.item_type.in_(PROCESS_DAY_SOURCE_ITEMS)
+        ),
+        models.DailyItemStock,
+        scope
     ).all()
     processed_by_item = {row.item_type: row for row in processed_rows}
 
+    tracked_items = list(PROCESS_DAY_SOURCE_ITEMS)
     opening_source = {}
-    if processed_rows:
-        for row in processed_rows:
-            opening_source[row.item_type] = {
-                "nag": Decimal(row.opening_quantity or 0) if row.opening_quantity is not None else None,
-                "weight": Decimal(row.opening_weight or 0)
-            }
-    else:
-        prev_rows = db.query(models.DailyItemStock).filter(
-            models.DailyItemStock.date < target_date
-        ).order_by(models.DailyItemStock.date.desc()).all()
-        if prev_rows:
-            for row in prev_rows:
-                opening_source.setdefault(row.item_type, {
-                    "nag": Decimal(row.actual_closing_quantity or 0) if row.actual_closing_quantity is not None else None,
-                    "weight": Decimal(row.actual_closing_weight or 0)
-                })
+    previous_date = target_date - timedelta(days=1)
+
+    # First choice: exact previous day's actual closing from Process Day.
+    previous_day_rows = apply_outlet_scope(
+        db.query(models.DailyItemStock).filter(
+            models.DailyItemStock.date == previous_date,
+            models.DailyItemStock.item_type.in_(PROCESS_DAY_SOURCE_ITEMS)
+        ),
+        models.DailyItemStock,
+        scope
+    ).all()
+    for row in previous_day_rows:
+        opening_source[row.item_type] = {
+            "nag": Decimal(row.actual_closing_quantity or 0) if row.actual_closing_quantity is not None else None,
+            "weight": Decimal(row.actual_closing_weight or 0)
+        }
+
+    # If the day itself is already processed, keep its stored opening only for
+    # rendering that processed day back again. This should match the previous
+    # day's actual closing that was used during Process Day.
+    for row in processed_rows:
+        opening_source.setdefault(row.item_type, {
+            "nag": Decimal(row.opening_quantity or 0) if row.opening_quantity is not None else None,
+            "weight": Decimal(row.opening_weight or 0)
+        })
+
+    stock_warning = None
+    if not processed_rows:
+        if not previous_day_rows:
+            stock_warning = f"Process Day for {previous_date.strftime('%d/%m/%Y')} is not filled yet."
         else:
-            for row in db.query(models.ItemOpeningStock).filter(
-                models.ItemOpeningStock.date <= target_date
-            ).order_by(models.ItemOpeningStock.date.desc()).all():
-                opening_source.setdefault(row.item_type, {
-                    "nag": Decimal(row.opening_quantity or 0) if row.opening_quantity is not None else None,
-                    "weight": Decimal(row.opening_weight or 0)
-                })
+            missing_previous_day_items = [item for item in tracked_items if item not in opening_source]
+            if missing_previous_day_items:
+                stock_warning = (
+                    "Previous day Process Day is incomplete. Missing: "
+                    + ", ".join(missing_previous_day_items[:8])
+                )
 
     opening_rows = []
     opening_total_quantity = None
@@ -4855,9 +5891,13 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
         opening_total_weight += weight
         opening_total_amount += amount
 
-    purchase_rows_raw = db.query(models.Transaction).filter(
-        models.Transaction.date == target_date,
-        models.Transaction.type == "PURCHASE"
+    purchase_rows_raw = apply_outlet_scope(
+        db.query(models.Transaction).filter(
+            models.Transaction.date == target_date,
+            models.Transaction.type == "PURCHASE"
+        ),
+        models.Transaction,
+        scope
     ).order_by(models.Transaction.item_type.asc(), models.Transaction.party_id.asc()).all()
 
     purchase_rows = []
@@ -4878,38 +5918,73 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
         purchase_total_amount += amount
         purchase_total_rate_weight += weight * rate
 
-    mortality_rows_raw = db.query(models.Transaction).filter(
-        models.Transaction.date == target_date,
-        models.Transaction.type == "MORTALITY"
-    ).order_by(models.Transaction.item_type.asc()).all()
-
-    mortality_grouped = db.query(
+    transport_mortality_grouped = db.query(
         models.Transaction.item_type.label("item_type"),
         func.sum(models.Transaction.quantity).label("quantity"),
         func.sum(models.Transaction.weight).label("weight")
     ).filter(
         models.Transaction.date == target_date,
-        models.Transaction.type == "MORTALITY"
+        models.Transaction.type == "MORTALITY",
+        models.Transaction.category == "TRANSPORTATION MORTALITY",
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.item_type
     ).order_by(
         models.Transaction.item_type.asc()
     ).all()
 
-    mortality_rows = []
-    mortality_total_quantity = None
-    mortality_total_weight = Decimal("0")
-    for row in mortality_grouped:
+    transport_mortality_rows = []
+    transport_mortality_total_quantity = None
+    transport_mortality_total_weight = Decimal("0")
+    for row in transport_mortality_grouped:
         quantity = Decimal(row.quantity or 0) if row.quantity is not None else None
         weight = Decimal(row.weight or 0)
-        mortality_rows.append(format_sheet_row(row.item_type or "Unknown", weight, Decimal("0"), Decimal("0"), quantity))
+        transport_mortality_rows.append(format_sheet_row(row.item_type or "Unknown", weight, Decimal("0"), Decimal("0"), quantity))
         if quantity is not None:
-            mortality_total_quantity = Decimal(mortality_total_quantity or 0) + quantity
-        mortality_total_weight += weight
+            transport_mortality_total_quantity = Decimal(transport_mortality_total_quantity or 0) + quantity
+        transport_mortality_total_weight += weight
 
-    sales_raw = db.query(models.Transaction).filter(
+    shop_mortality_grouped = db.query(
+        models.Transaction.item_type.label("item_type"),
+        func.sum(models.Transaction.quantity).label("quantity"),
+        func.sum(models.Transaction.weight).label("weight")
+    ).filter(
         models.Transaction.date == target_date,
-        models.Transaction.type == "SALE"
+        models.Transaction.type == "MORTALITY",
+        outlet_scope_filter(models.Transaction, scope),
+        or_(
+            models.Transaction.category == "SHOP MORTALITY",
+            models.Transaction.category == "MORTALITY"
+        )
+    ).group_by(
+        models.Transaction.item_type
+    ).order_by(
+        models.Transaction.item_type.asc()
+    ).all()
+
+    shop_mortality_rows = []
+    shop_mortality_total_quantity = None
+    shop_mortality_total_weight = Decimal("0")
+    for row in shop_mortality_grouped:
+        quantity = Decimal(row.quantity or 0) if row.quantity is not None else None
+        weight = Decimal(row.weight or 0)
+        shop_mortality_rows.append(format_sheet_row(row.item_type or "Unknown", weight, Decimal("0"), Decimal("0"), quantity))
+        if quantity is not None:
+            shop_mortality_total_quantity = Decimal(shop_mortality_total_quantity or 0) + quantity
+        shop_mortality_total_weight += weight
+
+    mortality_total_quantity = optional_decimal_sum(
+        value for value in [transport_mortality_total_quantity, shop_mortality_total_quantity] if value is not None
+    )
+    mortality_total_weight = transport_mortality_total_weight + shop_mortality_total_weight
+
+    sales_raw = apply_outlet_scope(
+        db.query(models.Transaction).filter(
+            models.Transaction.date == target_date,
+            models.Transaction.type == "SALE"
+        ),
+        models.Transaction,
+        scope
     ).order_by(models.Transaction.category.asc().nulls_last(), models.Transaction.item_type.asc()).all()
 
     sales_grouped = db.query(
@@ -4920,7 +5995,8 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
         func.sum(models.Transaction.amount).label("amount")
     ).filter(
         models.Transaction.date == target_date,
-        models.Transaction.type == "SALE"
+        models.Transaction.type == "SALE",
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.category,
         models.Transaction.item_type
@@ -4986,9 +6062,13 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
 
     gross_profit = total_sales_amount - purchase_total_amount + closing_amount - opening_total_amount
 
-    retail_credit_bills = db.query(models.RetailBill).filter(
-        models.RetailBill.date == target_date,
-        models.RetailBill.outstanding_amount > 0
+    retail_credit_bills = apply_outlet_scope(
+        db.query(models.RetailBill).filter(
+            models.RetailBill.date == target_date,
+            models.RetailBill.outstanding_amount > 0
+        ),
+        models.RetailBill,
+        scope
     ).order_by(
         models.RetailBill.customer_name.asc().nulls_last(),
         models.RetailBill.bill_number.asc()
@@ -5023,7 +6103,8 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
     ).filter(
         models.Transaction.date == target_date,
         models.Transaction.type == "PURCHASE",
-        models.Transaction.item_type.isnot(None)
+        models.Transaction.item_type.isnot(None),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.item_type
     ).order_by(
@@ -5050,7 +6131,8 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
         func.sum(models.Transaction.amount).label("amount")
     ).filter(
         models.Transaction.date == target_date,
-        models.Transaction.type == "SALE"
+        models.Transaction.type == "SALE",
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.category
     ).order_by(
@@ -5083,7 +6165,8 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
     ).filter(
         models.Transaction.date == target_date,
         models.Transaction.type == "SALE",
-        models.Transaction.item_type.isnot(None)
+        models.Transaction.item_type.isnot(None),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.category,
         models.Transaction.item_type
@@ -5112,7 +6195,8 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
     ).filter(
         models.Transaction.date == target_date,
         models.Transaction.type == "SALE",
-        models.Transaction.item_type.isnot(None)
+        models.Transaction.item_type.isnot(None),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.item_type
     ).order_by(
@@ -5151,26 +6235,37 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
     dressed_sales_weight = sum(Decimal(str(row["total"]["weight"])) for row in ordered_sales_sections if row["title"].upper() == "RETAIL DRESSED")
     dressed_sales_amount = sum(Decimal(str(row["total"]["total"])) for row in ordered_sales_sections if row["title"].upper() == "RETAIL DRESSED")
     dressed_live_cut_weight = Decimal(
-        db.query(func.coalesce(func.sum(models.DressedStockEntry.live_weight), 0))
-        .filter(models.DressedStockEntry.date == target_date)
-        .scalar() or 0
+        apply_outlet_scope(
+            db.query(func.coalesce(func.sum(models.DressedStockEntry.live_weight), 0)).filter(
+                models.DressedStockEntry.date == target_date
+            ),
+            models.DressedStockEntry,
+            scope
+        ).scalar() or 0
     )
     dressed_yield_weight = Decimal(
-        db.query(func.coalesce(func.sum(models.DressedStockEntry.dressed_weight), 0))
-        .filter(models.DressedStockEntry.date == target_date)
-        .scalar() or 0
+        apply_outlet_scope(
+            db.query(func.coalesce(func.sum(models.DressedStockEntry.dressed_weight), 0)).filter(
+                models.DressedStockEntry.date == target_date
+            ),
+            models.DressedStockEntry,
+            scope
+        ).scalar() or 0
     )
-    dressed_avg_on_live_weight = decimal_ratio(dressed_sales_amount, dressed_live_cut_weight)
-    dressed_yield_percent = (dressed_yield_weight / dressed_live_cut_weight * Decimal("100")) if dressed_live_cut_weight > 0 else Decimal("0")
+    dressed_avg_on_live_weight = decimal_ratio(dressed_sales_amount, dressed_live_cut_weight) if dressed_live_cut_weight > 0 else None
+    dressed_yield_percent = (dressed_yield_weight / dressed_live_cut_weight * Decimal("100")) if dressed_live_cut_weight > 0 else None
     sell_through = (total_sales_weight / (opening_total_weight + purchase_total_weight) * Decimal("100")) if (opening_total_weight + purchase_total_weight) > 0 else Decimal("0")
-    leakage_percent = (short_weight / closing_weight * Decimal("100")) if closing_weight > 0 else Decimal("0")
+    leakage_percent = (short_weight / closing_weight * Decimal("100")) if closing_weight > 0 and short_weight >= 0 else None
     realized_spread = total_sales_rate_value - total_purchase_rate_value
     retail_total_amount = sum(Decimal(str(section["total"]["total"])) for section in ordered_sales_sections if section["title"].upper() in ["RETAIL", "RETAIL DRESSED"])
     retail_mix_percent = (retail_total_amount / total_sales_amount * Decimal("100")) if total_sales_amount > 0 else Decimal("0")
-    stock_coverage_days = (closing_weight / total_sales_weight) if total_sales_weight > 0 else Decimal("0")
+    stock_coverage_days = (closing_weight / total_sales_weight) if total_sales_weight > 0 and closing_weight >= 0 else None
+    stock_math_invalid = closing_weight < 0
+    missing_dressed_live_cut = dressed_sales_weight > 0 and dressed_live_cut_weight <= 0
 
     return {
         "date": str(target_date),
+        "stock_warning": stock_warning,
         "opening_stock": {
             "rows": opening_rows,
             "total": format_sheet_row("TOTAL", opening_total_weight, (opening_total_amount / opening_total_weight) if opening_total_weight > 0 else Decimal("0"), opening_total_amount, opening_total_quantity)
@@ -5179,14 +6274,19 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
             "rows": purchase_rows,
             "total": format_sheet_row("TOTAL", purchase_total_weight, total_purchase_rate, purchase_total_amount, purchase_total_quantity)
         },
-        "mortality_stock": {
-            "rows": mortality_rows,
-            "total": format_sheet_row("TOTAL", mortality_total_weight, Decimal("0"), Decimal("0"), mortality_total_quantity)
+        "transport_mortality_stock": {
+            "rows": transport_mortality_rows,
+            "total": format_sheet_row("TOTAL", transport_mortality_total_weight, Decimal("0"), Decimal("0"), transport_mortality_total_quantity)
+        },
+        "shop_mortality_stock": {
+            "rows": shop_mortality_rows,
+            "total": format_sheet_row("TOTAL", shop_mortality_total_weight, Decimal("0"), Decimal("0"), shop_mortality_total_quantity)
         },
         "sales_sections": ordered_sales_sections,
         "final_stock": {
             "total_purchases": format_sheet_row("TOTAL PURCHASES", purchase_total_weight, total_purchase_rate, purchase_total_amount, purchase_total_quantity),
-            "mortality": format_sheet_row("MORTALITY", mortality_total_weight, Decimal("0"), Decimal("0"), mortality_total_quantity),
+            "transport_mortality": format_sheet_row("TRANSPORTATION MORTALITY", transport_mortality_total_weight, Decimal("0"), Decimal("0"), transport_mortality_total_quantity),
+            "shop_mortality": format_sheet_row("SHOP MORTALITY", shop_mortality_total_weight, Decimal("0"), Decimal("0"), shop_mortality_total_quantity),
             "sales": format_sheet_row("SALES", total_sales_weight, total_sales_rate, total_sales_amount, total_sales_quantity),
             "closing_stock": format_sheet_row("CLOSING STOCK", closing_weight, closing_rate, closing_amount, closing_quantity),
             "actual_stock": format_sheet_row("ACTUAL STOCK", actual_weight, closing_rate, actual_amount, actual_quantity),
@@ -5237,16 +6337,22 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
                 "subvalue": total_sales_quantity is not None and f"{float(total_sales_quantity):.0f} NAG" or None
             },
             {
-                "label": "Mortality",
-                "value": float(mortality_total_weight),
+                "label": "Transport Mortality",
+                "value": float(transport_mortality_total_weight),
                 "suffix": " kg",
-                "subvalue": mortality_total_quantity is not None and f"{float(mortality_total_quantity):.0f} NAG" or None
+                "subvalue": transport_mortality_total_quantity is not None and f"{float(transport_mortality_total_quantity):.0f} NAG" or None
+            },
+            {
+                "label": "Shop Mortality",
+                "value": float(shop_mortality_total_weight),
+                "suffix": " kg",
+                "subvalue": shop_mortality_total_quantity is not None and f"{float(shop_mortality_total_quantity):.0f} NAG" or None
             },
             {
                 "label": "Expected Closing",
                 "value": float(closing_weight),
                 "suffix": " kg",
-                "subvalue": closing_quantity is not None and f"{float(closing_quantity):.0f} NAG" or None
+                "subvalue": "Sales exceed available stock" if stock_math_invalid else (closing_quantity is not None and f"{float(closing_quantity):.0f} NAG" or None)
             },
             {
                 "label": "Actual Stock",
@@ -5258,7 +6364,7 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
                 "label": "Short By",
                 "value": float(short_weight),
                 "suffix": " kg",
-                "subvalue": short_quantity is not None and f"{float(short_quantity):.0f} NAG" or None
+                "subvalue": "Invalid until stock source is corrected" if stock_math_invalid else (short_quantity is not None and f"{float(short_quantity):.0f} NAG" or None)
             },
             {
                 "label": "Avg Buy Rate",
@@ -5272,8 +6378,10 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
             },
             {
                 "label": "Leakage %",
-                "value": float(leakage_percent),
-                "suffix": "%"
+                "value": float(leakage_percent) if leakage_percent is not None else None,
+                "suffix": "%",
+                "display_value": "N/A" if leakage_percent is None else None,
+                "subvalue": stock_math_invalid and "Expected closing is negative" or None
             },
             {
                 "label": "Sell Through",
@@ -5303,14 +6411,17 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
             },
             {
                 "label": "Dressed Avg",
-                "value": float(dressed_avg_on_live_weight),
+                "value": float(dressed_avg_on_live_weight) if dressed_avg_on_live_weight is not None else None,
                 "suffix": "/live kg",
-                "subvalue": f"Live cut {float(dressed_live_cut_weight):.3f} kg" if dressed_live_cut_weight > 0 else None
+                "display_value": "N/A" if dressed_avg_on_live_weight is None else None,
+                "subvalue": missing_dressed_live_cut and "Live cut weight missing" or (f"Live cut {float(dressed_live_cut_weight):.3f} kg" if dressed_live_cut_weight > 0 else None)
             },
             {
                 "label": "Stock Cover",
-                "value": float(stock_coverage_days),
-                "suffix": " days"
+                "value": float(stock_coverage_days) if stock_coverage_days is not None else None,
+                "suffix": " days",
+                "display_value": "N/A" if stock_coverage_days is None else None,
+                "subvalue": stock_math_invalid and "Closing stock is negative" or None
             },
             {
                 "label": "Gross Profit",
@@ -5326,32 +6437,59 @@ def daily_sheet(date: str, sheet_type: str = "stock", db: Session = Depends(get_
                 "dressed_weight_prepared": float(dressed_yield_weight),
                 "dressed_weight_sold": float(dressed_sales_weight),
                 "dressed_sales_amount": float(dressed_sales_amount),
-                "avg_amount_per_live_kg": float(dressed_avg_on_live_weight),
-                "yield_percent": float(dressed_yield_percent)
+                "avg_amount_per_live_kg": float(dressed_avg_on_live_weight) if dressed_avg_on_live_weight is not None else None,
+                "yield_percent": float(dressed_yield_percent) if dressed_yield_percent is not None else None,
+                "warning": "Live cut weight missing for dressed entries." if missing_dressed_live_cut else None
             }
         }
     }
 
 
-@app.get("/inventory/by-item")
-def inventory_by_item(date: str, db: Session = Depends(get_db)):
+@app.get("/daily-sheet/export")
+def export_daily_sheet(
+    date: str,
+    sheet_type: str = "stock",
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+    scope=Depends(get_outlet_scope)
+):
+    sheet_payload = daily_sheet(date=date, sheet_type=sheet_type, db=db, user=user, scope=scope)
+    if isinstance(sheet_payload, dict) and sheet_payload.get("error"):
+        return sheet_payload
+
     target_date = parse_input_date(date)
     if not target_date:
         return {"error": "Invalid date format"}
 
-    items = stock_item_names_query(db)
+    return build_daily_sheet_export_report(sheet_payload, sheet_type.strip().lower(), target_date)
+
+
+@app.get("/inventory/by-item")
+def inventory_by_item(date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
+    if scope["mode"] == "all":
+        return {"error": "Select one outlet for inventory details", "inventory": []}
+
+    target_date = parse_input_date(date)
+    if not target_date:
+        return {"error": "Invalid date format"}
+
+    items = stock_item_names_query(db, scope)
 
     result = []
     processed_by_item = {
         row.item_type: row
-        for row in db.query(models.DailyItemStock).filter(
-            models.DailyItemStock.date == target_date
+        for row in apply_outlet_scope(
+            db.query(models.DailyItemStock).filter(models.DailyItemStock.date == target_date),
+            models.DailyItemStock,
+            scope
         ).all()
     }
 
     openings_by_item = {}
-    openings = db.query(models.ItemOpeningStock).filter(
-        models.ItemOpeningStock.date <= target_date
+    openings = apply_outlet_scope(
+        db.query(models.ItemOpeningStock).filter(models.ItemOpeningStock.date <= target_date),
+        models.ItemOpeningStock,
+        scope
     ).order_by(
         models.ItemOpeningStock.item_type.asc(),
         models.ItemOpeningStock.date.desc()
@@ -5361,10 +6499,14 @@ def inventory_by_item(date: str, db: Session = Depends(get_db)):
         openings_by_item.setdefault(opening.item_type, opening)
 
     txns_by_item = {}
-    txns = db.query(models.Transaction).filter(
-        models.Transaction.date <= target_date,
-        models.Transaction.item_type.isnot(None),
-        models.Transaction.type.in_(["PURCHASE", "SALE"])
+    txns = apply_outlet_scope(
+        db.query(models.Transaction).filter(
+            models.Transaction.date <= target_date,
+            models.Transaction.item_type.isnot(None),
+            models.Transaction.type.in_(["PURCHASE", "SALE"])
+        ),
+        models.Transaction,
+        scope
     ).all()
 
     for txn in txns:
@@ -5416,9 +6558,9 @@ def inventory_by_item(date: str, db: Session = Depends(get_db)):
 
 
 @app.get("/items/search")
-def search_items(q: str = "", db: Session = Depends(get_db)):
+def search_items(q: str = "", db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     normalized_query = q.strip().lower()
-    items = stock_item_names_query(db)
+    items = stock_item_names_query(db, scope)
 
     results = sorted(
         item for item in items
@@ -5428,8 +6570,16 @@ def search_items(q: str = "", db: Session = Depends(get_db)):
     return {"results": results}
 
 
+@app.get("/items/tracked")
+def tracked_items(db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
+    if scope["mode"] == "all":
+        return {"error": "Select one outlet for tracked items", "items": []}
+
+    return {"items": PROCESS_DAY_SOURCE_ITEMS}
+
+
 @app.get("/analytics/profit-by-item")
-def profit_by_item(start_date: str, end_date: str, db: Session = Depends(get_db)):
+def profit_by_item(start_date: str, end_date: str, db: Session = Depends(get_db), scope=Depends(get_outlet_scope)):
     start = parse_input_date(start_date)
     end = parse_input_date(end_date)
     if not start or not end:
@@ -5451,7 +6601,8 @@ def profit_by_item(start_date: str, end_date: str, db: Session = Depends(get_db)
         ).label("purchase")
     ).filter(
         models.Transaction.date.between(start, end),
-        models.Transaction.item_type.isnot(None)
+        models.Transaction.item_type.isnot(None),
+        outlet_scope_filter(models.Transaction, scope)
     ).group_by(
         models.Transaction.item_type
     ).order_by(
@@ -5470,7 +6621,7 @@ def profit_by_item(start_date: str, end_date: str, db: Session = Depends(get_db)
 
 
 if FRONTEND_DIR.exists():
-    # Serve the static admin app from the same Render web service as the API.
+    # Serve the themed client-finance frontend from the same app as the API.
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
 
 if __name__ == "__main__":

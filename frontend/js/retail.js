@@ -1,21 +1,26 @@
 const RETAIL_SHOP_PROFILE = {
-  name: "Amar Chicken Center",
-  proprietor: "",
-  address: "5, Gokulpeth, Nagpur, Maharashtra 440010",
-  phone: "9923500574"
+  name: "NP Chicken Shop",
+  proprietor: "Prop. Sandeep S. Alag (Appu)",
+  address: "Shop No. 58, Kamaal Chowk Bazaar, Nagpur",
+  phone: "9371291195 / 7972329562"
 };
 
-const RETAIL_SHORTCUT_ITEMS = [
-  { name: "CB", rate: 0, line_type: "STANDARD", unit: "KGS" },
-  { name: "BB", rate: 0, line_type: "STANDARD", unit: "KGS" },
-  { name: "COCREL", rate: 0, line_type: "STANDARD", unit: "KGS" },
-  { name: "DESI", rate: 0, line_type: "STANDARD", unit: "KGS" },
-  { name: "LEGOAN", rate: 0, line_type: "STANDARD", unit: "KGS" },
-  { name: "LOOS", rate: 0, line_type: "STANDARD", unit: "KGS" }
-];
+const RETAIL_PAYMENT_QR_VIEW = {
+  label: "Scan & Pay",
+  imageSrc: "assets/payment-qr.png",
+  upiId: "soney.1105-1@okicici"
+};
+
+const RETAIL_PAYMENT_MODE_LABELS = {
+  Cash: "Cash",
+  Online: "UPI",
+  Bank: "Bank",
+  Credit: "Credit",
+  Cheque: "Cheque"
+};
+
 const RETAIL_PENDING_STORAGE_KEY = "stockpilot.retail.pending";
-const RETAIL_SHORTCUT_STORAGE_KEY = "stockpilot.retail.shortcuts";
-const RETAIL_SYNC_DEBUG_VERSION = "2026-05-11-sync-debug-1";
+const LOCAL_PRINT_BRIDGE_URL = localStorage.getItem("stockpilot.printBridgeUrl") || "http://127.0.0.1:9876";
 
 let retailItemSuggestTimer = null;
 let retailCustomerSuggestTimer = null;
@@ -37,13 +42,187 @@ let dressedStockLoadedForDate = "";
 let retailPartyDirectoryCache = [];
 let retailPartyDirectoryLoaded = false;
 let retailPartyDirectoryPromise = null;
+let retailShortcutsCache = [];
+let retailShortcutsLoaded = false;
+let retailShortcutsPromise = null;
+let retailShortcutsOutletId = "";
 const retailPartyBalanceByMode = {
   regular: 0,
   dressed: 0
 };
 let retailSuggestHideTimer = null;
-const RETAIL_PAYMENT_MODES = ["Cash", "Online", "Bank", "Cheque"];
-let retailLastSyncStage = "";
+
+async function printThroughLocalBridge(path, payload) {
+  const response = await fetch(`${LOCAL_PRINT_BRIDGE_URL}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data?.error) {
+    throw new Error(data?.error || `Printer bridge failed (${response.status})`);
+  }
+  return data;
+}
+
+function buildRetailBridgePayload(bill) {
+  return {
+    shop: RETAIL_SHOP_PROFILE,
+    bill: {
+      bill_number: bill.bill_number,
+      date: bill.date,
+      time: bill.time || new Date().toLocaleTimeString("en-GB"),
+      cashier_name: bill.cashier_name || "admin",
+      customer_name: bill.customer_name || "",
+      customer_phone: bill.customer_phone || "",
+      customer_address: bill.customer_address || "",
+      payment_mode: bill.payment_mode || "Cash",
+      payment_breakdown: normalizeRetailPaymentBreakdown(bill),
+      paid_amount: Number(bill.paid_amount || 0),
+      outstanding_amount: Number(bill.outstanding_amount || 0),
+      running_balance: Number(bill.party_balance ?? bill.outstanding_amount ?? 0),
+      total_amount: Number(bill.total_amount || 0),
+      total_weight: Number(bill.total_weight || 0),
+      total_nag: Number(bill.total_nag || bill.total_quantity || 0),
+      ice_amount: Number(bill.ice_amount || 0),
+      items_subtotal_amount: Number(bill.items_subtotal_amount ?? (Number(bill.total_amount || 0) - Number(bill.ice_amount || 0))),
+      notes: bill.notes || "",
+      items: (bill.items || []).map(item => ({
+        item_name: item.item_name || "",
+        line_type: item.line_type || "STANDARD",
+        nag: Number(item.nag || item.quantity || 0),
+        weight: Number(item.weight || 0),
+        rate: Number(item.rate || 0),
+        amount: Number(item.amount || 0)
+      }))
+    }
+  };
+}
+
+function buildPaymentReceiptBridgePayload(receipt) {
+  return {
+    shop: RETAIL_SHOP_PROFILE,
+    receipt: {
+      receipt_number: receipt.receipt_number,
+      date: receipt.date,
+      time: receipt.time || new Date().toLocaleTimeString("en-GB"),
+      cashier_name: receipt.cashier_name || "admin",
+      party_name: receipt.party_name || "",
+      party_phone: receipt.party_phone || "",
+      party_address: receipt.party_address || "",
+      direction: receipt.direction || "RECEIVED",
+      payment_mode: receipt.payment_mode || "Cash",
+      amount: Number(receipt.amount || 0),
+      balance_after: Number(receipt.balance_after || 0),
+      notes: receipt.notes || ""
+    }
+  };
+}
+
+function openRetailBrowserPrintWindow(bill) {
+  const printWindow = window.open("", "_blank", "width=420,height=820");
+  if (!printWindow) {
+    showToast("Allow popups to print bill");
+    return false;
+  }
+
+  printWindow.document.write(`
+    <html>
+      <head>
+        <title>Retail Bill ${escapeHtml(bill.bill_number)}</title>
+        <style>
+          @page { size: 80mm auto; margin: 0; }
+          body { margin: 0; font-family: "Courier New", monospace; background: white; color: #111; }
+          .bill { width: 76mm; margin: 0 auto; padding: 4mm 2.5mm 5mm; }
+          .thermal-bill { width: 100%; color: #111; }
+          .thermal-label, .thermal-header-mini, .thermal-rule, .thermal-note-mini { text-align: center; }
+          .thermal-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
+          .thermal-center { text-align: center; }
+          .thermal-center h3 { margin: 2px 0 3px; font-size: 18px; line-height: 1.1; }
+          .thermal-center p { margin: 1px 0; font-size: 11px; line-height: 1.25; }
+          .thermal-header-mini { margin-top: 4px; font-size: 10px; }
+          .thermal-header-title { font-weight: 700; letter-spacing: 0.08em; }
+          .thermal-meta-grid { margin-top: 7px; font-size: 11px; }
+          .thermal-meta-row { display: flex; justify-content: space-between; gap: 8px; margin: 1px 0; }
+          .thermal-customer { margin-top: 6px; font-size: 11px; }
+          .thermal-customer p { margin: 1px 0; }
+          .thermal-rule { margin: 2px 0 0; font-size: 10px; letter-spacing: 0; }
+          .thermal-items-table { width: 100% !important; min-width: 0 !important; max-width: 100% !important; border-collapse: collapse; table-layout: fixed; font-size: 9px; }
+          .thermal-items-table th, .thermal-items-table td { padding: 2px 0; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: clip; }
+          .thermal-items-table th { font-weight: 700; }
+          .thermal-items-table th:nth-child(1), .thermal-items-table td:nth-child(1) { width: 6%; text-align: left; }
+          .thermal-items-table th:nth-child(2), .thermal-items-table td:nth-child(2) { width: 30%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+          .thermal-items-table th:nth-child(3), .thermal-items-table td:nth-child(3) { width: 15%; text-align: right; padding-right: 6px; }
+          .thermal-items-table th:nth-child(4), .thermal-items-table td:nth-child(4) { width: 17%; text-align: right; padding-left: 6px; padding-right: 4px; }
+          .thermal-items-table th:nth-child(5), .thermal-items-table td:nth-child(5) { width: 14%; text-align: right; }
+          .thermal-items-table th:nth-child(6), .thermal-items-table td:nth-child(6) { width: 18%; text-align: right; }
+          .thermal-items-table.thermal-items-table-dressed th:nth-child(1), .thermal-items-table.thermal-items-table-dressed td:nth-child(1) { width: 8%; }
+          .thermal-items-table.thermal-items-table-dressed th:nth-child(2), .thermal-items-table.thermal-items-table-dressed td:nth-child(2) { width: 38%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+          .thermal-items-table.thermal-items-table-dressed th:nth-child(3), .thermal-items-table.thermal-items-table-dressed td:nth-child(3) { width: 18%; text-align: right; }
+          .thermal-items-table.thermal-items-table-dressed th:nth-child(4), .thermal-items-table.thermal-items-table-dressed td:nth-child(4) { width: 16%; text-align: right; }
+          .thermal-items-table.thermal-items-table-dressed th:nth-child(5), .thermal-items-table.thermal-items-table-dressed td:nth-child(5) { width: 20%; text-align: right; }
+          .thermal-section-row td { padding-top: 5px; font-weight: 700; border-top: 1px dashed #a8adb7; }
+          .thermal-summary { margin-top: 1px; font-size: 11px; }
+          .thermal-summary p, .thermal-summary-row { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; }
+          .thermal-summary-compact { margin-bottom: 2px; }
+          .thermal-balance-summary { margin-top: 4px; }
+          .thermal-totals-table { margin-top: 1px; }
+          .thermal-total-row td { padding-top: 3px; font-size: 11px; font-weight: 700; border-top: none; }
+          .thermal-total-row td:first-child { text-align: left; }
+          .thermal-total { margin-top: 4px; padding-top: 4px; border-top: 1px dashed #666; font-weight: 700; }
+          .thermal-notes, .thermal-note-mini { margin-top: 6px; font-size: 10px; line-height: 1.25; }
+          .thermal-footer { margin-top: 10px; text-align: center; font-size: 11px; }
+          .thermal-footer p { margin: 1px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="bill">${getRetailReceiptMarkup(bill)}</div>
+        <script>
+          window.onload = function () {
+            window.print();
+            setTimeout(function () { window.close(); }, 250);
+          };
+        </script>
+      </body>
+    </html>
+  `);
+  printWindow.document.close();
+  return true;
+}
+
+function openPaymentReceiptBrowserPrintWindow(receipt) {
+  const printWindow = window.open("", "_blank", "width=420,height=820");
+  if (!printWindow) {
+    showToast("Allow popups to print receipt");
+    return false;
+  }
+
+  printWindow.document.write(`
+    <html>
+      <head>
+        <title>Payment Receipt ${escapeHtml(receipt.receipt_number)}</title>
+        <style>
+          @page { size: 80mm auto; margin: 0; }
+          body { margin: 0; font-family: "Courier New", monospace; background: white; color: #111; }
+          .bill { width: 76mm; margin: 0 auto; padding: 4mm 2.5mm 5mm; }
+          .thermal-section-row td { padding-top: 5px; font-weight: 700; border-top: 1px dashed #a8adb7; }
+        </style>
+      </head>
+      <body>
+        <div class="bill">${getPaymentReceiptMarkup(receipt)}</div>
+        <script>
+          window.onload = function () {
+            window.print();
+            setTimeout(function () { window.close(); }, 250);
+          };
+        </script>
+      </body>
+    </html>
+  `);
+  printWindow.document.close();
+  return true;
+}
 
 const RETAIL_MODE_FIELDS = {
   regular: {
@@ -52,10 +231,12 @@ const RETAIL_MODE_FIELDS = {
     cashier: "retailCashier",
     settlementType: "retailSettlementType",
     paymentMode: "retailPaymentMode",
+    secondaryPaymentMode: "retailSecondaryPaymentMode",
     customerName: "retailCustomerName",
     customerPhone: "retailCustomerPhone",
     customerAddress: "retailCustomerAddress",
     iceAmount: "retailIceAmount",
+    secondaryPaidAmount: "retailSecondaryPaidAmount",
     paidAmount: "retailPaidAmount",
     notes: "retailNotes"
   },
@@ -65,10 +246,12 @@ const RETAIL_MODE_FIELDS = {
     cashier: "retailCashier",
     settlementType: "retailSettlementType",
     paymentMode: "retailPaymentMode",
+    secondaryPaymentMode: "retailSecondaryPaymentMode",
     customerName: "retailCustomerName",
     customerPhone: "retailCustomerPhone",
     customerAddress: "retailCustomerAddress",
     iceAmount: "retailIceAmount",
+    secondaryPaidAmount: "retailSecondaryPaidAmount",
     paidAmount: "retailPaidAmount",
     notes: "retailNotes"
   }
@@ -83,165 +266,7 @@ function retailField(mode, field) {
   return id ? document.getElementById(id) : null;
 }
 
-function getRetailEstimatedTotal(mode = retailBillingMode) {
-  const items = collectRetailItemsFromForm(mode);
-  const itemsSubtotalAmount = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-  const iceAmount = Number(retailField(mode, "iceAmount")?.value || 0);
-  return itemsSubtotalAmount + iceAmount;
-}
-
-function addRetailPaymentRow(entry = null, options = {}) {
-  const { skipDirty = false } = options;
-  const container = document.getElementById("retailPaymentBreakdownRows");
-  if (!container) return;
-
-  const row = document.createElement("div");
-  row.className = "retail-payment-row";
-  row.innerHTML = `
-    <select class="retailPaymentSplitMode" aria-label="Payment mode">
-      ${RETAIL_PAYMENT_MODES.map(mode => `<option value="${mode}">${mode}</option>`).join("")}
-    </select>
-    <input type="number" class="retailPaymentSplitAmount" placeholder="Amount" min="0" step="0.01">
-    <button type="button" onclick="removeRetailPaymentRow(this)">Remove</button>
-  `;
-
-  container.appendChild(row);
-  row.querySelector(".retailPaymentSplitMode").value = entry?.mode || entry?.payment_mode || "Cash";
-  row.querySelector(".retailPaymentSplitAmount").value = entry?.amount ?? "";
-  if (entry?.amount > 0) {
-    row.querySelector(".retailPaymentSplitAmount").dataset.autoFilled = "false";
-  }
-
-  row.querySelectorAll("select,input").forEach(input => {
-    input.addEventListener("input", () => handleRetailPaymentBreakdownChange());
-    input.addEventListener("change", () => handleRetailPaymentBreakdownChange());
-  });
-
-  if (!skipDirty) {
-    retailDraftDirty = true;
-    retailBillCompleted = false;
-    syncRetailSettlementUi();
-  }
-}
-
-function removeRetailPaymentRow(button) {
-  const row = button.closest(".retail-payment-row");
-  const container = document.getElementById("retailPaymentBreakdownRows");
-  if (!row || !container) return;
-
-  if (container.children.length <= 1) {
-    row.querySelector(".retailPaymentSplitMode").value = "Cash";
-    row.querySelector(".retailPaymentSplitAmount").value = "";
-  } else {
-    row.remove();
-  }
-
-  retailDraftDirty = true;
-  retailBillCompleted = false;
-  syncRetailSettlementUi();
-}
-
-function collectRetailPaymentBreakdown() {
-  return Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"))
-    .map(row => ({
-      mode: row.querySelector(".retailPaymentSplitMode")?.value || "Cash",
-      amount: Number(row.querySelector(".retailPaymentSplitAmount")?.value || 0)
-    }))
-    .filter(entry => entry.amount > 0);
-}
-
-function getRetailPaymentBreakdownState(mode = retailBillingMode) {
-  const settlementType = retailField(mode, "settlementType")?.value || "paid";
-  const totalAmount = getRetailEstimatedTotal(mode);
-  const rows = Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"));
-  const positiveEntries = collectRetailPaymentBreakdown();
-
-  if (settlementType === "credit") {
-    return {
-      settlementType,
-      totalAmount,
-      paymentBreakdown: [],
-      paidAmount: 0,
-      outstandingAmount: totalAmount,
-      paymentMode: "Credit"
-    };
-  }
-
-  if (!positiveEntries.length && settlementType === "paid" && totalAmount > 0) {
-    const fallbackMode = rows[0]?.querySelector(".retailPaymentSplitMode")?.value || "Cash";
-    return {
-      settlementType,
-      totalAmount,
-      paymentBreakdown: [{ mode: fallbackMode, amount: totalAmount }],
-      paidAmount: totalAmount,
-      outstandingAmount: 0,
-      paymentMode: fallbackMode
-    };
-  }
-
-  const paidAmount = positiveEntries.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
-  const outstandingAmount = Math.max(totalAmount - paidAmount, 0);
-  const uniqueModes = [...new Set(positiveEntries.map(entry => entry.mode).filter(Boolean))];
-  const paymentMode = uniqueModes.length ? uniqueModes.join(" + ") : (settlementType === "credit" ? "Credit" : "Cash");
-
-  return {
-    settlementType,
-    totalAmount,
-    paymentBreakdown: positiveEntries,
-    paidAmount,
-    outstandingAmount,
-    paymentMode
-  };
-}
-
-function handleRetailPaymentBreakdownChange() {
-  if (document.activeElement?.classList?.contains("retailPaymentSplitAmount")) {
-    document.activeElement.dataset.autoFilled = "false";
-  }
-  autoFillRetailSplitBalance();
-  retailDraftDirty = true;
-  retailBillCompleted = false;
-  syncRetailSettlementUi();
-}
-
-function autoFillRetailSplitBalance(mode = retailBillingMode) {
-  const settlementType = retailField(mode, "settlementType")?.value || "paid";
-  if (settlementType !== "paid") return;
-
-  const rows = Array.from(document.querySelectorAll("#retailPaymentBreakdownRows .retail-payment-row"));
-  if (rows.length !== 2) return;
-
-  const activeInput = document.activeElement?.classList?.contains("retailPaymentSplitAmount")
-    ? document.activeElement
-    : null;
-  if (!activeInput) return;
-
-  const currentRow = activeInput.closest(".retail-payment-row");
-  const otherRow = rows.find(row => row !== currentRow);
-  const otherInput = otherRow?.querySelector(".retailPaymentSplitAmount");
-  if (!currentRow || !otherInput) return;
-
-  const totalAmount = getRetailEstimatedTotal(mode);
-  const currentAmount = Number(activeInput.value || 0);
-  const remainingAmount = Math.max(totalAmount - currentAmount, 0);
-  const otherWasAutoFilled = otherInput.dataset.autoFilled === "true";
-  const otherIsBlank = String(otherInput.value || "").trim() === "";
-
-  if (!otherIsBlank && !otherWasAutoFilled) return;
-
-  if (!activeInput.value) {
-    if (otherWasAutoFilled) {
-      otherInput.value = "";
-      otherInput.dataset.autoFilled = "false";
-    }
-    return;
-  }
-
-  otherInput.value = remainingAmount > 0 ? remainingAmount.toFixed(2) : "";
-  otherInput.dataset.autoFilled = remainingAmount > 0 ? "true" : "false";
-}
-
-function initRetailPage() {
+async function initRetailPage() {
   retailPageBootstrapped = false;
   paymentReceiptHistoryLoaded = false;
   dressedStockLoadedForDate = "";
@@ -270,8 +295,14 @@ function initRetailPage() {
     settlementType.addEventListener("change", () => handleRetailSettlementTypeChange());
   }
 
+  const secondaryPaymentMode = retailField("regular", "secondaryPaymentMode");
+  if (secondaryPaymentMode) {
+    secondaryPaymentMode.addEventListener("change", () => handleRetailSettlementTypeChange());
+  }
+
   const customerNameInput = retailField("regular", "customerName");
   if (customerNameInput) {
+    customerNameInput.addEventListener("input", () => resetLinkedRetailPartyFieldsIfNameChanged("regular"));
     customerNameInput.addEventListener("change", () => hydrateRetailCustomerProfile(customerNameInput.value));
     customerNameInput.addEventListener("blur", () => hydrateRetailCustomerProfile(customerNameInput.value));
     customerNameInput.addEventListener("blur", () => scheduleSuggestionBoxHide("retailCustomerSuggestBox"));
@@ -311,6 +342,7 @@ function initRetailPage() {
 
   const paymentReceiptPartyName = document.getElementById("paymentReceiptPartyName");
   if (paymentReceiptPartyName) {
+    paymentReceiptPartyName.addEventListener("input", resetLinkedPaymentReceiptFieldsIfNameChanged);
     paymentReceiptPartyName.addEventListener("change", () => hydratePaymentReceiptPartyProfile(paymentReceiptPartyName.value));
     paymentReceiptPartyName.addEventListener("blur", () => hydratePaymentReceiptPartyProfile(paymentReceiptPartyName.value));
     paymentReceiptPartyName.addEventListener("blur", () => scheduleSuggestionBoxHide("paymentReceiptPartySuggestBox"));
@@ -318,22 +350,44 @@ function initRetailPage() {
 
   attachRetailConnectivityListeners();
   addRegularRetailRow();
+  addDressedRetailRow();
+  await ensureRetailShortcutsLoaded();
   renderRetailShortcuts();
   renderShortcutManagerList();
   renderRetailOfflineBanner();
-  addRetailPaymentRow(null, { skipDirty: true });
   syncRetailSettlementUi();
   setRetailBillingMode("regular");
-  ensureRetailPartyDirectoryLoaded();
   refreshRetailBillNumber();
   scheduleRetailPreviewRender();
   loadRetailBills();
-  syncPendingRetailBills(true);
+  setTimeout(() => ensureRetailPartyDirectoryLoaded(), 120);
+  setTimeout(() => ensureDressedStockLoaded(), 180);
+  setTimeout(() => syncPendingRetailBills(true), 320);
   retailPageBootstrapped = true;
+}
+
+async function initRetailSetupPage() {
+  const setupDate = document.getElementById("retailDate");
+  if (!setupDate) return;
+
+  dressedStockLoadedForDate = "";
+  setupDate.value = formatDateInput(new Date());
+  setupDate.addEventListener("change", async () => {
+    dressedStockLoadedForDate = "";
+    if (retailBillingMode === "dressed") {
+      await ensureDressedStockLoaded();
+    }
+  });
+
+  await ensureRetailShortcutsLoaded();
+  renderShortcutManagerList();
+  setRetailBillingMode("regular");
+  ensureRetailPartyDirectoryLoaded();
 }
 
 function setRetailBillingMode(mode) {
   retailBillingMode = mode === "dressed" ? "dressed" : mode === "payment" ? "payment" : "regular";
+  const onSetupPage = isRetailSetupPage();
   const regularButton = document.getElementById("retailModeRegular");
   const dressedButton = document.getElementById("retailModeDressed");
   const paymentButton = document.getElementById("retailModePayment");
@@ -357,8 +411,8 @@ function setRetailBillingMode(mode) {
   if (dressedButton) dressedButton.classList.toggle("active", retailBillingMode === "dressed");
   if (paymentButton) paymentButton.classList.toggle("active", retailBillingMode === "payment");
   if (salesSection) salesSection.style.display = retailBillingMode === "payment" ? "none" : "";
-  if (regularSection) regularSection.style.display = retailBillingMode === "regular" ? "" : "none";
-  if (dressedSection) dressedSection.style.display = retailBillingMode === "dressed" ? "" : "none";
+  if (regularSection) regularSection.style.display = onSetupPage ? (retailBillingMode === "regular" ? "" : "none") : "";
+  if (dressedSection) dressedSection.style.display = onSetupPage ? (retailBillingMode === "dressed" ? "" : "none") : "";
   if (paymentSection) paymentSection.style.display = retailBillingMode === "payment" ? "" : "none";
   if (setupSection) setupSection.style.display = retailBillingMode === "payment" ? "none" : "";
   if (dressedStockSetupSection) dressedStockSetupSection.style.display = retailBillingMode === "dressed" ? "" : "none";
@@ -372,55 +426,173 @@ function setRetailBillingMode(mode) {
   if (paymentHistorySection) paymentHistorySection.style.display = retailBillingMode === "payment" ? "" : "none";
   const historyTitle = document.getElementById("retailHistoryTitle");
   if (modeTitle) {
-    if (retailBillingMode === "dressed") {
-      modeTitle.innerText = "Dressed Billing";
+    if (onSetupPage && retailBillingMode === "dressed") {
+      modeTitle.innerText = "Dressed Setup";
+    } else if (onSetupPage && retailBillingMode === "regular") {
+      modeTitle.innerText = "Regular Setup";
     } else if (retailBillingMode === "payment") {
       modeTitle.innerText = "Payment Receipt";
     } else {
-      modeTitle.innerText = "Regular Billing";
+      modeTitle.innerText = "Retail Billing";
     }
   }
   if (previewTitle) {
     if (retailBillingMode === "payment") {
       previewTitle.innerText = "Payment Receipt Preview";
-    } else if (retailBillingMode === "dressed") {
-      previewTitle.innerText = "Dressed Bill Preview";
     } else {
-      previewTitle.innerText = "Regular Bill Preview";
+      previewTitle.innerText = "Retail Bill Preview";
     }
   }
   if (historyTitle) {
-    historyTitle.innerText = retailBillingMode === "dressed" ? "Recent Dressed Bills" : "Recent Retail Bills";
+    historyTitle.innerText = onSetupPage
+      ? (retailBillingMode === "dressed" ? "Recent Dressed Bills" : "Recent Retail Bills")
+      : "Recent Retail Bills";
   }
   if (addItemButton) {
     addItemButton.innerText = retailBillingMode === "dressed" ? "Add Dressed Item" : "Add Regular Item";
   }
 
+  renderShortcutManagerList();
+
   if (retailBillingMode === "payment") {
     ensurePaymentReceiptModeReady();
     schedulePaymentReceiptPreviewRender();
   } else {
-    if (retailBillingMode === "dressed") {
-      ensureDressedModeReady();
+    if (onSetupPage) {
+      if (retailBillingMode === "dressed") {
+        ensureDressedModeReady();
+      } else {
+        ensureRegularModeReady();
+      }
+      if (currentRetailBill && !retailDraftDirty && getRetailBillMode(currentRetailBill) === retailBillingMode) {
+        renderRetailPreview(currentRetailBill);
+      }
     } else {
       ensureRegularModeReady();
-    }
-    if (currentRetailBill && !retailDraftDirty && getRetailBillMode(currentRetailBill) === retailBillingMode) {
-      renderRetailPreview(currentRetailBill);
+      ensureDressedModeReady();
+      if (currentRetailBill && !retailDraftDirty) {
+        renderRetailPreview(currentRetailBill);
+      }
     }
     scheduleRetailPreviewRender();
     loadRetailBills();
   }
 }
 
+function isRetailSetupPage() {
+  return !!document.querySelector(".retail-setup-page");
+}
+
+function isCombinedRetailBillingPage() {
+  return !isRetailSetupPage();
+}
+
 function getRetailBillMode(bill) {
-  const hasDressed = (bill?.items || []).some(item => (item.line_type || "STANDARD").toUpperCase() === "DRESSED");
-  return hasDressed ? "dressed" : "regular";
+  const items = bill?.items || [];
+  const hasRegular = items.some(item => (item.line_type || "STANDARD").toUpperCase() !== "DRESSED");
+  const hasDressed = items.some(item => (item.line_type || "STANDARD").toUpperCase() === "DRESSED");
+  if (hasRegular && hasDressed) return "both";
+  if (hasDressed) return "dressed";
+  return "regular";
 }
 
 function normalizeRetailBillMode(bill) {
   if (bill?.bill_mode) return String(bill.bill_mode).toLowerCase();
   return getRetailBillMode(bill);
+}
+
+function normalizeRetailPaymentMode(mode, fallback = "Cash", allowCredit = true) {
+  const rawMode = String(mode || "").trim().toUpperCase();
+  const modeMap = {
+    CASH: "Cash",
+    ONLINE: "Online",
+    UPI: "Online",
+    BANK: "Bank",
+    CHEQUE: "Cheque",
+    CREDIT: "Credit"
+  };
+  const normalized = modeMap[rawMode] || "";
+  if (normalized === "Credit" && !allowCredit) return fallback;
+  return normalized || fallback;
+}
+
+function getRetailPaymentModeLabel(mode) {
+  return RETAIL_PAYMENT_MODE_LABELS[mode] || mode || "Cash";
+}
+
+function normalizeRetailPaymentBreakdown(bill) {
+  const rawBreakdown = Array.isArray(bill?.payment_breakdown) ? bill.payment_breakdown : [];
+  const merged = new Map();
+
+  rawBreakdown.forEach(entry => {
+    const amount = Number(entry?.amount || 0);
+    if (amount <= 0) return;
+    const normalizedMode = normalizeRetailPaymentMode(entry?.mode, "", false);
+    if (!normalizedMode) return;
+    merged.set(normalizedMode, Number((merged.get(normalizedMode) || 0) + amount));
+  });
+
+  if (!merged.size && Number(bill?.paid_amount || 0) > 0) {
+    const singleMode = normalizeRetailPaymentMode(bill?.payment_mode, "Cash", false);
+    merged.set(singleMode, Number(bill?.paid_amount || 0));
+  }
+
+  return Array.from(merged.entries()).map(([mode, amount]) => ({
+    mode,
+    amount: Number(amount || 0)
+  }));
+}
+
+function summarizeRetailPaymentModes(breakdown, outstandingAmount = 0) {
+  const modes = [];
+  breakdown.forEach(entry => {
+    if (entry?.mode && !modes.includes(entry.mode)) {
+      modes.push(entry.mode);
+    }
+  });
+  if (Number(outstandingAmount || 0) > 0 && !modes.includes("Credit")) {
+    modes.push("Credit");
+  }
+  return modes.length ? modes.join(" + ") : "Credit";
+}
+
+function formatRetailPaymentSummary(summary) {
+  return String(summary || "")
+    .split("+")
+    .map(part => getRetailPaymentModeLabel(normalizeRetailPaymentMode(part, "", true)) || part.trim())
+    .filter(Boolean)
+    .join(" + ");
+}
+
+function buildRetailPaymentBreakdown({ settlementType, paidAmount, paymentMode, secondaryPaymentMode, secondaryPaidAmount }) {
+  const safePaidAmount = Math.max(Number(paidAmount || 0), 0);
+  if (settlementType === "credit" || safePaidAmount <= 0) {
+    return [];
+  }
+
+  const primaryMode = normalizeRetailPaymentMode(paymentMode, "Cash", false);
+  const optionalSecondaryMode = normalizeRetailPaymentMode(secondaryPaymentMode, "", false);
+  const safeSecondaryAmount = optionalSecondaryMode
+    ? Math.max(0, Math.min(Number(secondaryPaidAmount || 0), safePaidAmount))
+    : 0;
+  const primaryAmount = Math.max(0, safePaidAmount - safeSecondaryAmount);
+  const merged = new Map();
+
+  if (primaryAmount > 0) {
+    merged.set(primaryMode, Number((merged.get(primaryMode) || 0) + primaryAmount));
+  }
+  if (optionalSecondaryMode && safeSecondaryAmount > 0) {
+    merged.set(optionalSecondaryMode, Number((merged.get(optionalSecondaryMode) || 0) + safeSecondaryAmount));
+  }
+
+  if (!merged.size && safePaidAmount > 0) {
+    merged.set(primaryMode, safePaidAmount);
+  }
+
+  return Array.from(merged.entries()).map(([mode, amount]) => ({
+    mode,
+    amount: Number(amount || 0)
+  }));
 }
 
 function getActiveRetailDate() {
@@ -567,7 +739,7 @@ function hideSuggestionBox(boxId) {
 
 function scheduleSuggestionBoxHide(boxId) {
   clearTimeout(retailSuggestHideTimer);
-  retailSuggestHideTimer = setTimeout(() => hideSuggestionBox(boxId), 120);
+  retailSuggestHideTimer = setTimeout(() => hideSuggestionBox(boxId), 220);
 }
 
 function getCachedPartyProfile(name) {
@@ -585,14 +757,67 @@ function getRetailPartyBalance(mode) {
   return Number(retailPartyBalanceByMode[mode] || 0);
 }
 
+function storeLinkedPartyState(nameInput, phoneInput, addressInput, party) {
+  if (!nameInput) return;
+  nameInput.dataset.linkedPartyName = normalizeRetailPartyLookup(party?.name || "");
+  nameInput.dataset.linkedPartyPhone = party?.phone || "";
+  nameInput.dataset.linkedPartyAddress = party?.address || "";
+  if (phoneInput) phoneInput.dataset.linkedFromParty = "true";
+  if (addressInput) addressInput.dataset.linkedFromParty = "true";
+}
+
+function clearLinkedPartyState(nameInput, phoneInput, addressInput) {
+  if (nameInput) {
+    delete nameInput.dataset.linkedPartyName;
+    delete nameInput.dataset.linkedPartyPhone;
+    delete nameInput.dataset.linkedPartyAddress;
+  }
+  if (phoneInput) delete phoneInput.dataset.linkedFromParty;
+  if (addressInput) delete addressInput.dataset.linkedFromParty;
+}
+
+function resetLinkedRetailPartyFieldsIfNameChanged(mode = retailBillingMode) {
+  const input = retailField(mode, "customerName");
+  const phoneInput = retailField(mode, "customerPhone");
+  const addressInput = retailField(mode, "customerAddress");
+  if (!input) return;
+
+  const linkedName = input.dataset.linkedPartyName || "";
+  const currentName = normalizeRetailPartyLookup(input.value);
+  if (!linkedName || linkedName === currentName) return;
+
+  if (phoneInput) phoneInput.value = "";
+  if (addressInput) addressInput.value = "";
+  clearLinkedPartyState(input, phoneInput, addressInput);
+  setRetailPartyBalance(mode, 0);
+  scheduleRetailPreviewRender();
+}
+
+function resetLinkedPaymentReceiptFieldsIfNameChanged() {
+  const input = document.getElementById("paymentReceiptPartyName");
+  const phoneInput = document.getElementById("paymentReceiptPartyPhone");
+  const addressInput = document.getElementById("paymentReceiptPartyAddress");
+  if (!input) return;
+
+  const linkedName = input.dataset.linkedPartyName || "";
+  const currentName = normalizeRetailPartyLookup(input.value);
+  if (!linkedName || linkedName === currentName) return;
+
+  if (phoneInput) phoneInput.value = "";
+  if (addressInput) addressInput.value = "";
+  clearLinkedPartyState(input, phoneInput, addressInput);
+  schedulePaymentReceiptPreviewRender();
+}
+
 function applyRetailPartyToFields(party, mode = retailBillingMode) {
   if (!party) return;
   const input = retailField(mode, "customerName");
   const phoneInput = retailField(mode, "customerPhone");
   const addressInput = retailField(mode, "customerAddress");
   if (input) input.value = party.name || input.value;
-  if (phoneInput && !phoneInput.value.trim()) phoneInput.value = party.phone || "";
-  if (addressInput && !addressInput.value.trim()) addressInput.value = party.address || "";
+  if (phoneInput) phoneInput.value = party.phone || "";
+  if (addressInput) addressInput.value = party.address || "";
+  storeLinkedPartyState(input, phoneInput, addressInput, party);
   setRetailPartyBalance(mode, party.balance_after ?? party.party_balance ?? 0);
   scheduleRetailPreviewRender();
 }
@@ -603,8 +828,9 @@ function applyPaymentReceiptPartyToFields(party) {
   const phoneInput = document.getElementById("paymentReceiptPartyPhone");
   const addressInput = document.getElementById("paymentReceiptPartyAddress");
   if (input) input.value = party.name || input.value;
-  if (phoneInput && !phoneInput.value.trim()) phoneInput.value = party.phone || "";
-  if (addressInput && !addressInput.value.trim()) addressInput.value = party.address || "";
+  if (phoneInput) phoneInput.value = party.phone || "";
+  if (addressInput) addressInput.value = party.address || "";
+  storeLinkedPartyState(input, phoneInput, addressInput, party);
   schedulePaymentReceiptPreviewRender();
 }
 
@@ -614,7 +840,9 @@ function renderRetailPartyMatches(boxId, suggestions, parties, onPick) {
 }
 
 function isCurrentRetailBillForActiveMode() {
-  return !!currentRetailBill && getRetailBillMode(currentRetailBill) === retailBillingMode;
+  if (!currentRetailBill) return false;
+  if (isCombinedRetailBillingPage()) return retailBillingMode !== "payment";
+  return getRetailBillMode(currentRetailBill) === retailBillingMode;
 }
 
 async function ensurePaymentReceiptModeReady() {
@@ -711,27 +939,104 @@ function renderRetailShortcuts() {
 }
 
 function getRetailShortcuts() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(RETAIL_SHORTCUT_STORAGE_KEY) || "null");
-    if (Array.isArray(saved) && saved.length) {
-      return saved;
-    }
-  } catch (e) {
-    console.error("Failed to load shortcuts", e);
+  return Array.isArray(retailShortcutsCache) ? retailShortcutsCache : [];
+}
+
+async function ensureRetailShortcutsLoaded(force = false) {
+  const activeOutletId = getSelectedOutletId();
+  if (retailShortcutsOutletId !== activeOutletId) {
+    retailShortcutsCache = [];
+    retailShortcutsLoaded = false;
+    retailShortcutsPromise = null;
+    retailShortcutsOutletId = activeOutletId;
   }
-  return RETAIL_SHORTCUT_ITEMS;
+  if (retailShortcutsLoaded && !force) return retailShortcutsCache;
+  if (retailShortcutsPromise && !force) return retailShortcutsPromise;
+
+  retailShortcutsPromise = optionalApiCall(
+    "/retail-shortcuts",
+    { results: [] },
+    "GET",
+    null,
+    { cache: !force }
+  ).then(data => {
+    retailShortcutsCache = Array.isArray(data?.results) ? data.results : [];
+    retailShortcutsLoaded = true;
+    retailShortcutsPromise = null;
+    retailShortcutsOutletId = activeOutletId;
+    return retailShortcutsCache;
+  }).catch(err => {
+    console.error("Failed to load shortcuts", err);
+    retailShortcutsPromise = null;
+    retailShortcutsCache = [];
+    return retailShortcutsCache;
+  });
+
+  return retailShortcutsPromise;
 }
 
-function setRetailShortcuts(shortcuts) {
-  localStorage.setItem(RETAIL_SHORTCUT_STORAGE_KEY, JSON.stringify(shortcuts));
+function resetRetailShortcutCache() {
+  retailShortcutsLoaded = false;
+  retailShortcutsPromise = null;
+  retailShortcutsCache = [];
+  clearCachedResponse("/retail-shortcuts");
 }
 
-function saveRetailShortcut() {
+function cancelRetailShortcutEdit() {
+  const editingInput = document.getElementById("editingShortcutOriginalName");
+  const nameInput = document.getElementById("shortcutName");
+  const rateInput = document.getElementById("shortcutRate");
+  const unitInput = document.getElementById("shortcutUnit");
+  const lineTypeInput = document.getElementById("shortcutLineType");
+  const sourceTypeInput = document.getElementById("shortcutSourceItemType");
+  const saveButton = document.getElementById("saveShortcutButton");
+  const cancelButton = document.getElementById("cancelShortcutEditButton");
+
+  if (editingInput) editingInput.value = "";
+  if (nameInput) nameInput.value = "";
+  if (rateInput) rateInput.value = "";
+  if (lineTypeInput) lineTypeInput.value = retailBillingMode === "dressed" ? "DRESSED" : "STANDARD";
+  if (sourceTypeInput) sourceTypeInput.value = "";
+  if (unitInput) {
+    unitInput.value = "KGS";
+    unitInput.style.display = retailBillingMode === "dressed" ? "none" : "";
+  }
+  if (saveButton) saveButton.innerText = "Save Shortcut";
+  if (cancelButton) cancelButton.style.display = "none";
+}
+
+function startRetailShortcutEdit(shortcut) {
+  const editingInput = document.getElementById("editingShortcutOriginalName");
+  const nameInput = document.getElementById("shortcutName");
+  const rateInput = document.getElementById("shortcutRate");
+  const unitInput = document.getElementById("shortcutUnit");
+  const lineTypeInput = document.getElementById("shortcutLineType");
+  const sourceTypeInput = document.getElementById("shortcutSourceItemType");
+  const saveButton = document.getElementById("saveShortcutButton");
+  const cancelButton = document.getElementById("cancelShortcutEditButton");
+
+  if (editingInput) editingInput.value = shortcut.id || "";
+  if (nameInput) nameInput.value = shortcut.name || "";
+  if (rateInput) rateInput.value = Number(shortcut.rate || 0) > 0 ? Number(shortcut.rate).toFixed(2) : "";
+  if (lineTypeInput) lineTypeInput.value = (shortcut.line_type || "STANDARD").toUpperCase();
+  if (sourceTypeInput) sourceTypeInput.value = shortcut.source_item_type || "";
+  if (unitInput) {
+    unitInput.value = shortcut.unit || "KGS";
+    unitInput.style.display = (shortcut.line_type || "STANDARD").toUpperCase() === "DRESSED" ? "none" : "";
+  }
+  if (saveButton) saveButton.innerText = "Update Shortcut";
+  if (cancelButton) cancelButton.style.display = "";
+  nameInput?.focus();
+}
+
+async function saveRetailShortcut() {
   const name = document.getElementById("shortcutName")?.value.trim();
+  const editingShortcutId = document.getElementById("editingShortcutOriginalName")?.value.trim();
   const lineType = retailBillingMode === "dressed"
     ? "DRESSED"
     : (document.getElementById("shortcutLineType")?.value || "STANDARD");
   const rate = Number(document.getElementById("shortcutRate")?.value || 0);
+  const sourceItemType = document.getElementById("shortcutSourceItemType")?.value || "";
   const unit = lineType === "DRESSED" ? "KGS" : (document.getElementById("shortcutUnit")?.value || "KGS");
 
   if (!name) {
@@ -739,21 +1044,42 @@ function saveRetailShortcut() {
     return;
   }
 
-  const shortcuts = getRetailShortcuts().filter(item => item.name.toLowerCase() !== name.toLowerCase());
-  shortcuts.push({ name, rate, line_type: lineType, unit });
-  shortcuts.sort((a, b) => a.name.localeCompare(b.name));
-  setRetailShortcuts(shortcuts);
+  const response = await apiCall(
+    "/retail-shortcuts",
+    "POST",
+    JSON.stringify({
+      id: editingShortcutId || "",
+      name,
+      rate,
+      line_type: lineType,
+      source_item_type: sourceItemType,
+      unit
+    }),
+    { "Content-Type": "application/json" }
+  );
+
+  if (response?.error) {
+    showToast(response.error);
+    return;
+  }
+
+  resetRetailShortcutCache();
+  await ensureRetailShortcutsLoaded(true);
   renderRetailShortcuts();
   renderShortcutManagerList();
-  document.getElementById("shortcutName").value = "";
-  const shortcutRateInput = document.getElementById("shortcutRate");
-  if (shortcutRateInput) shortcutRateInput.value = "";
-  showToast("Shortcut saved");
+  cancelRetailShortcutEdit();
+  showToast(editingShortcutId ? "Shortcut updated" : "Shortcut saved");
 }
 
-function removeRetailShortcut(name) {
-  const shortcuts = getRetailShortcuts().filter(item => item.name !== name);
-  setRetailShortcuts(shortcuts);
+async function removeRetailShortcut(shortcutId) {
+  const response = await apiCall(`/retail-shortcuts/${shortcutId}`, "DELETE");
+  if (response?.error) {
+    showToast(response.error);
+    return;
+  }
+
+  resetRetailShortcutCache();
+  await ensureRetailShortcutsLoaded(true);
   renderRetailShortcuts();
   renderShortcutManagerList();
 }
@@ -769,14 +1095,22 @@ function renderShortcutManagerList() {
     chip.className = "retail-shortcut-chip retail-shortcut-chip-managed";
     const text = document.createElement("span");
     text.innerText = activeLineType === "DRESSED"
-      ? `${shortcut.name} | DRESSED | Rs ${Number(shortcut.rate || 0).toFixed(2)}`
-      : `${shortcut.name} | ${shortcut.line_type || "STANDARD"} | ${shortcut.unit || "KGS"} | Rs ${Number(shortcut.rate || 0).toFixed(2)}`;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.innerText = "Remove";
-    button.onclick = () => removeRetailShortcut(shortcut.name);
+      ? `${shortcut.name} | ${shortcut.source_item_type || "-"} | DRESSED | Rs ${Number(shortcut.rate || 0).toFixed(2)}`
+      : `${shortcut.name} | ${shortcut.source_item_type || "-"} | ${shortcut.line_type || "STANDARD"} | ${shortcut.unit || "KGS"} | Rs ${Number(shortcut.rate || 0).toFixed(2)}`;
+    const actions = document.createElement("div");
+    actions.className = "retail-shortcut-managed-actions";
+    const editButton = document.createElement("button");
+    editButton.type = "button";
+    editButton.innerText = "Edit";
+    editButton.onclick = () => startRetailShortcutEdit(shortcut);
+    const removeButton = document.createElement("button");
+    removeButton.type = "button";
+    removeButton.innerText = "Remove";
+    removeButton.onclick = () => removeRetailShortcut(shortcut.id);
+    actions.appendChild(editButton);
+    actions.appendChild(removeButton);
     chip.appendChild(text);
-    chip.appendChild(button);
+    chip.appendChild(actions);
     container.appendChild(chip);
   });
   if (!visibleShortcuts.length) {
@@ -829,9 +1163,10 @@ function addRetailItemRow(item = null, defaultLineType = "STANDARD") {
   const row = document.createElement("div");
   row.className = "retail-item-row";
   row.dataset.lineType = lineType;
+  row.dataset.sourceItemType = item?.source_item_type || "";
   row.innerHTML = `
     <input type="text" class="retailItemName" placeholder="Item name" list="retailItemSuggestions" autocomplete="off" oninput="suggestRetailItems(this); recalcRetailLine(this)">
-    <input type="number" class="retailQty" placeholder="NAG" min="0" step="0.01" oninput="recalcRetailLine(this)">
+    <input type="number" class="retailQty" placeholder="NAG" min="0" step="1" oninput="recalcRetailLine(this)">
     <select class="retailUnit" onchange="recalcRetailLine(this)">
       <option value="KGS">KGS</option>
       <option value="PCS">PCS</option>
@@ -877,6 +1212,7 @@ function addShortcutRetailItem(shortcut) {
 
   itemInput.value = shortcut.name;
   targetRow.dataset.lineType = lineType;
+  targetRow.dataset.sourceItemType = shortcut.source_item_type || "";
   unitSelect.value = shortcut.unit || "KGS";
   if (lineType !== "DRESSED" && !qtyInput.value && unitSelect.value === "PCS") {
     qtyInput.value = "1";
@@ -1003,6 +1339,7 @@ function applyRetailDefaults(row) {
 
   const shortcut = getRetailShortcutByName(itemName);
   if (shortcut) {
+    row.dataset.sourceItemType = shortcut.source_item_type || "";
     if (lineType !== "DRESSED" && (!unitInput.value || unitInput.value === "KGS")) {
       unitInput.value = shortcut.unit || unitInput.value || "KGS";
     }
@@ -1013,11 +1350,11 @@ function applyRetailDefaults(row) {
 }
 
 function collectRetailItemsFromForm(mode = retailBillingMode) {
-  const selector = mode === "dressed"
-    ? "#retailDressedRows .retail-item-row"
-    : "#retailRegularRows .retail-item-row";
+  const selectors = isCombinedRetailBillingPage() && mode !== "payment"
+    ? ["#retailRegularRows .retail-item-row", "#retailDressedRows .retail-item-row"]
+    : [mode === "dressed" ? "#retailDressedRows .retail-item-row" : "#retailRegularRows .retail-item-row"];
 
-  return Array.from(document.querySelectorAll(selector))
+  return selectors.flatMap(selector => Array.from(document.querySelectorAll(selector)))
     .map(row => {
       const lineType = getRetailRowLineType(row);
       const quantity = lineType === "DRESSED" ? 0 : Number(row.querySelector(".retailQty")?.value || 0);
@@ -1025,6 +1362,7 @@ function collectRetailItemsFromForm(mode = retailBillingMode) {
       return {
         item_name: row.querySelector(".retailItemName")?.value.trim(),
         line_type: lineType,
+        source_item_type: row.dataset.sourceItemType || "",
         nag: quantity,
         quantity,
         unit: lineType === "DRESSED" ? "KGS" : (row.querySelector(".retailUnit")?.value || "KGS"),
@@ -1041,13 +1379,33 @@ function buildRetailBillFromForm(mode = retailBillingMode) {
   const itemsSubtotalAmount = items.reduce((sum, item) => sum + Number(item.amount || 0), 0);
   const totalNag = items.reduce((sum, item) => sum + Number(item.nag || item.quantity || 0), 0);
   const totalWeight = items.reduce((sum, item) => sum + Number(item.weight || (item.unit === "KGS" ? item.nag || item.quantity : 0) || 0), 0);
+  const paymentMode = normalizeRetailPaymentMode(retailField(mode, "paymentMode")?.value || "Cash", "Cash", true);
+  const secondaryPaymentMode = normalizeRetailPaymentMode(retailField(mode, "secondaryPaymentMode")?.value || "", "", false);
   const settlementType = retailField(mode, "settlementType")?.value || "paid";
   const customerName = retailField(mode, "customerName")?.value.trim() || "";
   const iceAmount = Number(retailField(mode, "iceAmount")?.value || 0);
+  const rawPaidAmount = retailField(mode, "paidAmount")?.value;
   const totalAmount = itemsSubtotalAmount + iceAmount;
-  const paymentState = getRetailPaymentBreakdownState(mode);
-  const paidAmount = Math.min(Number(paymentState.paidAmount || 0), totalAmount);
+  let paidAmount = Math.min(
+    rawPaidAmount === "" && paymentMode !== "Credit" ? totalAmount : Number(rawPaidAmount || 0),
+    totalAmount
+  );
+
+  if (settlementType === "paid") {
+    paidAmount = totalAmount;
+  } else if (settlementType === "credit") {
+    paidAmount = 0;
+  }
+
   const outstandingAmount = Math.max(totalAmount - paidAmount, 0);
+  const paymentBreakdown = buildRetailPaymentBreakdown({
+    settlementType,
+    paidAmount,
+    paymentMode,
+    secondaryPaymentMode,
+    secondaryPaidAmount: retailField(mode, "secondaryPaidAmount")?.value
+  });
+  const paymentSummary = summarizeRetailPaymentModes(paymentBreakdown, outstandingAmount);
   const priorPartyBalance = customerName ? getRetailPartyBalance(mode) : 0;
   const partyBalance = priorPartyBalance + outstandingAmount;
 
@@ -1056,13 +1414,13 @@ function buildRetailBillFromForm(mode = retailBillingMode) {
     date: retailField(mode, "date")?.value || formatDateInput(new Date()),
     time: new Date().toLocaleTimeString("en-GB"),
     cashier_name: retailField(mode, "cashier")?.value.trim() || "admin",
-    bill_mode: mode,
+    bill_mode: getRetailBillMode({ items }),
     customer_name: customerName,
     customer_phone: retailField(mode, "customerPhone")?.value.trim() || "",
     customer_address: retailField(mode, "customerAddress")?.value.trim() || "",
     settlement_type: settlementType,
-    payment_mode: paymentState.paymentMode,
-    payment_breakdown: paymentState.paymentBreakdown,
+    payment_mode: paymentSummary,
+    payment_breakdown: paymentBreakdown,
     paid_amount: paidAmount,
     outstanding_amount: outstandingAmount,
     party_balance: partyBalance,
@@ -1146,33 +1504,55 @@ function schedulePaymentReceiptPreviewRender() {
 function syncRetailSettlementUi(mode = retailBillingMode) {
   const settlementType = retailField(mode, "settlementType");
   const paymentMode = retailField(mode, "paymentMode");
+  const secondaryPaymentMode = retailField(mode, "secondaryPaymentMode");
+  const secondaryPaidAmount = retailField(mode, "secondaryPaidAmount");
   const paidAmount = retailField(mode, "paidAmount");
-  const paymentSection = document.getElementById("retailPaymentBreakdownSection");
-  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
 
   if (!settlementType || !paymentMode || !paidAmount) return;
 
   const settlementValue = settlementType.value || "paid";
-  if (paymentRows && paymentRows.children.length === 0) {
-    addRetailPaymentRow(null, { skipDirty: true });
-  }
 
   if (settlementValue === "credit") {
     paymentMode.value = "Credit";
+    paymentMode.disabled = true;
+    if (secondaryPaymentMode) {
+      secondaryPaymentMode.value = "";
+      secondaryPaymentMode.disabled = true;
+    }
+    if (secondaryPaidAmount) {
+      secondaryPaidAmount.value = "";
+      secondaryPaidAmount.disabled = true;
+      secondaryPaidAmount.placeholder = "Second mode disabled for credit";
+    }
     paidAmount.value = "0";
     paidAmount.disabled = true;
     paidAmount.placeholder = "Paid amount (0 for credit)";
-    if (paymentSection) paymentSection.style.display = "none";
+  } else if (settlementValue === "paid") {
+    if (paymentMode.value === "Credit") paymentMode.value = "Cash";
+    paymentMode.disabled = false;
+    if (secondaryPaymentMode) {
+      secondaryPaymentMode.disabled = false;
+    }
+    if (secondaryPaidAmount) {
+      secondaryPaidAmount.disabled = !(secondaryPaymentMode?.value || "").trim();
+      secondaryPaidAmount.placeholder = "Amount in second mode";
+    }
+    paidAmount.disabled = true;
+    paidAmount.value = "";
+    paidAmount.placeholder = "Paid automatically as full bill";
   } else {
-    if (paymentSection) paymentSection.style.display = "";
+    if (paymentMode.value === "Credit") paymentMode.value = "Cash";
+    paymentMode.disabled = false;
+    if (secondaryPaymentMode) {
+      secondaryPaymentMode.disabled = false;
+    }
+    if (secondaryPaidAmount) {
+      secondaryPaidAmount.disabled = !(secondaryPaymentMode?.value || "").trim();
+      secondaryPaidAmount.placeholder = "Amount in second mode";
+    }
     paidAmount.disabled = false;
-    paidAmount.placeholder = "Paid amount (auto)";
+    paidAmount.placeholder = "Total paid now";
   }
-
-  const paymentState = getRetailPaymentBreakdownState(mode);
-  paymentMode.value = paymentState.paymentMode || (settlementValue === "credit" ? "Credit" : "Cash");
-  paidAmount.value = paymentState.paidAmount > 0 ? Number(paymentState.paidAmount).toFixed(2) : (settlementValue === "credit" ? "0.00" : "");
-  paidAmount.readOnly = true;
 }
 
 function populateRetailFormFromBill(bill) {
@@ -1180,60 +1560,53 @@ function populateRetailFormFromBill(bill) {
   const dressedRows = document.getElementById("retailDressedRows");
   if (!regularRows || !dressedRows || !bill) return;
   const billMode = getRetailBillMode(bill);
+  const formMode = isCombinedRetailBillingPage() ? "regular" : (billMode === "both" ? "regular" : billMode);
 
-  retailField(billMode, "date").value = bill.date || formatDateInput(new Date());
-  retailField(billMode, "billNumber").value = bill.bill_number || "";
-  retailField(billMode, "cashier").value = bill.cashier_name || "admin";
+  retailField(formMode, "date").value = bill.date || formatDateInput(new Date());
+  retailField(formMode, "billNumber").value = bill.bill_number || "";
+  retailField(formMode, "cashier").value = bill.cashier_name || "admin";
   const totalAmount = Number(bill.total_amount || 0);
   const paidAmount = Number(bill.paid_amount || 0);
+  const paymentBreakdown = normalizeRetailPaymentBreakdown(bill);
   let settlementType = "partial";
   if (paidAmount <= 0) settlementType = "credit";
   else if (paidAmount >= totalAmount) settlementType = "paid";
-  retailField(billMode, "settlementType").value = settlementType;
-  retailField(billMode, "paymentMode").value = bill.payment_mode || "Cash";
-  retailField(billMode, "customerName").value = bill.customer_name || "";
-  retailField(billMode, "customerPhone").value = bill.customer_phone || "";
-  retailField(billMode, "customerAddress").value = bill.customer_address || "";
-  retailField(billMode, "iceAmount").value = bill.ice_amount ?? "";
-  retailField(billMode, "paidAmount").value = bill.paid_amount ?? "";
-  retailField(billMode, "notes").value = bill.notes || "";
-  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
-  if (paymentRows) paymentRows.innerHTML = "";
-  const breakdown = Array.isArray(bill.payment_breakdown) && bill.payment_breakdown.length
-    ? bill.payment_breakdown
-    : (paidAmount > 0 ? [{ mode: bill.payment_mode || "Cash", amount: paidAmount }] : []);
-  if (breakdown.length) {
-    breakdown.forEach(entry => addRetailPaymentRow(entry, { skipDirty: true }));
-  } else {
-    addRetailPaymentRow(null, { skipDirty: true });
-  }
-  syncRetailSettlementUi(billMode);
+  retailField(formMode, "settlementType").value = settlementType;
+  retailField(formMode, "paymentMode").value = paymentBreakdown[0]?.mode || (settlementType === "credit" ? "Credit" : "Cash");
+  retailField(formMode, "secondaryPaymentMode").value = paymentBreakdown[1]?.mode || "";
+  retailField(formMode, "customerName").value = bill.customer_name || "";
+  retailField(formMode, "customerPhone").value = bill.customer_phone || "";
+  retailField(formMode, "customerAddress").value = bill.customer_address || "";
+  retailField(formMode, "iceAmount").value = bill.ice_amount ?? "";
+  retailField(formMode, "secondaryPaidAmount").value = paymentBreakdown[1]?.amount ?? "";
+  retailField(formMode, "paidAmount").value = bill.paid_amount ?? "";
+  retailField(formMode, "notes").value = bill.notes || "";
+  syncRetailSettlementUi(formMode);
   if (settlementType === "partial") {
-    retailField(billMode, "paidAmount").value = bill.paid_amount ?? "";
+    retailField(formMode, "paidAmount").value = bill.paid_amount ?? "";
   }
 
   regularRows.innerHTML = "";
   dressedRows.innerHTML = "";
   (bill.items || []).forEach(item => {
-    if (billMode === "dressed" && (item.line_type || "STANDARD").toUpperCase() === "DRESSED") {
+    if ((item.line_type || "STANDARD").toUpperCase() === "DRESSED") {
       addRetailItemRow(item, "DRESSED");
-    }
-    if (billMode === "regular" && (item.line_type || "STANDARD").toUpperCase() !== "DRESSED") {
+    } else {
       addRetailItemRow(item, "STANDARD");
     }
   });
 
-  if (billMode === "regular" && !(bill.items || []).some(item => (item.line_type || "STANDARD").toUpperCase() === "STANDARD")) {
+  if (!(bill.items || []).some(item => (item.line_type || "STANDARD").toUpperCase() === "STANDARD")) {
     addRegularRetailRow();
   }
-  if (billMode === "dressed" && !(bill.items || []).some(item => (item.line_type || "STANDARD").toUpperCase() === "DRESSED")) {
+  if (!(bill.items || []).some(item => (item.line_type || "STANDARD").toUpperCase() === "DRESSED")) {
     addDressedRetailRow();
   }
 
   currentRetailBill = bill;
   retailDraftDirty = false;
   retailBillCompleted = true;
-  setRetailBillingMode(billMode);
+  setRetailBillingMode(isCombinedRetailBillingPage() ? "regular" : (billMode === "both" ? "regular" : billMode));
   renderRetailPreview(currentRetailBill);
 }
 
@@ -1271,17 +1644,7 @@ async function saveRetailBill(options = {}) {
   }
 
   if (!draft.items.length) {
-    showToast(retailBillingMode === "dressed" ? "Add at least one dressed item" : "Add at least one regular item");
-    return;
-  }
-
-  const splitPaidAmount = (draft.payment_breakdown || []).reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
-  if (splitPaidAmount - Number(draft.total_amount || 0) > 0.001) {
-    showToast("Split payment total cannot exceed bill total");
-    return;
-  }
-  if (draft.settlement_type === "paid" && Math.abs(splitPaidAmount - Number(draft.total_amount || 0)) > 0.001) {
-    showToast("For paid in full, split payments must match the full bill total");
+    showToast(isCombinedRetailBillingPage() ? "Add at least one regular or dressed item" : (retailBillingMode === "dressed" ? "Add at least one dressed item" : "Add at least one regular item"));
     return;
   }
 
@@ -1305,7 +1668,7 @@ async function saveRetailBill(options = {}) {
       customer_name: draft.customer_name,
       customer_phone: draft.customer_phone,
       customer_address: draft.customer_address,
-      payment_mode: draft.payment_mode,
+      payment_mode: normalizeRetailPaymentBreakdown(draft)[0]?.mode || "Cash",
       payment_breakdown: draft.payment_breakdown,
       paid_amount: draft.paid_amount,
       ice_amount: draft.ice_amount,
@@ -1323,9 +1686,16 @@ async function saveRetailBill(options = {}) {
     retailBillCompleted = true;
     renderRetailPreview(currentRetailBill);
     showToast(`Retail bill ${currentRetailBill.bill_number} ${isEditing ? "updated" : "saved"}`);
-    await loadRetailBills();
+    if (typeof clearCachedResponsesByPrefix === "function") {
+      clearCachedResponsesByPrefix("/retail-bills");
+      clearCachedResponsesByPrefix("/party/profile?name=");
+    }
+    if (typeof clearOperationalCaches === "function") {
+      clearOperationalCaches();
+    }
+    await loadRetailBills(true);
     if (retailBillingMode === "dressed") {
-      await loadDressedStock();
+      await loadDressedStock(true);
     }
     if (autoStartNext) {
       startNextRetailBill();
@@ -1340,7 +1710,13 @@ async function saveRetailBill(options = {}) {
       retailBillCompleted = true;
       renderRetailPreview(currentRetailBill);
       renderRetailOfflineBanner();
-      await loadRetailBills();
+      if (typeof clearCachedResponsesByPrefix === "function") {
+        clearCachedResponsesByPrefix("/retail-bills");
+      }
+      if (typeof clearOperationalCaches === "function") {
+        clearOperationalCaches();
+      }
+      await loadRetailBills(true);
       showToast(`Saved offline. Bill ${offlineBill.bill_number} will sync later.`);
       return offlineBill;
     }
@@ -1406,7 +1782,14 @@ async function savePaymentReceipt(options = {}) {
     paymentReceiptCompleted = true;
     renderPaymentReceiptPreview(currentPaymentReceipt);
     showToast(`Payment receipt ${currentPaymentReceipt.receipt_number} ${isEditing ? "updated" : "saved"}`);
-    await loadPaymentReceipts();
+    if (typeof clearCachedResponsesByPrefix === "function") {
+      clearCachedResponsesByPrefix("/payment-receipts");
+      clearCachedResponsesByPrefix("/party/profile?name=");
+    }
+    if (typeof clearOperationalCaches === "function") {
+      clearOperationalCaches();
+    }
+    await loadPaymentReceipts(true);
     if (autoStartNext) {
       startNextPaymentReceipt();
     }
@@ -1418,7 +1801,7 @@ async function savePaymentReceipt(options = {}) {
   }
 }
 
-async function loadPaymentReceipts() {
+async function loadPaymentReceipts(force = false) {
   const date = document.getElementById("paymentReceiptDate")?.value;
   const body = document.getElementById("paymentReceiptBody");
   if (!body) return;
@@ -1434,7 +1817,7 @@ async function loadPaymentReceipts() {
       { results: [] },
       "GET",
       null,
-      { cache: false }
+      { cache: !force }
     );
 
     if (!(data.results || []).length) {
@@ -1476,7 +1859,7 @@ async function openPaymentReceipt(receiptId) {
   }
 }
 
-async function loadRetailBills() {
+async function loadRetailBills(force = false) {
   const date = getActiveRetailDate();
   const body = document.getElementById("retailBillsBody");
   if (!body) return;
@@ -1487,25 +1870,24 @@ async function loadRetailBills() {
     const params = new URLSearchParams();
     if (date) params.set("date", date);
     const query = params.toString();
+    const pendingBills = getPendingRetailBills().filter(bill => !date || bill.date === date);
     const data = navigator.onLine
       ? await optionalApiCall(
           `/retail-bills${query ? `?${query}` : ""}`,
           { results: [] },
           "GET",
           null,
-          { cache: false }
+          { cache: !force }
         )
       : { results: [] };
-    const reconciledPendingBills = navigator.onLine
-      ? reconcilePendingRetailBillsWithServer(data.results || [])
-      : getPendingRetailBills();
-    const pendingBills = reconciledPendingBills.filter(bill => !date || bill.date === date);
 
     const mergedResults = mergeRetailBillResults(data.results || [], pendingBills);
-    const visibleResults = mergedResults.filter(bill => normalizeRetailBillMode(bill) === retailBillingMode);
+    const visibleResults = isCombinedRetailBillingPage()
+      ? mergedResults
+      : mergedResults.filter(bill => normalizeRetailBillMode(bill) === retailBillingMode);
 
     if (!visibleResults.length) {
-      body.innerHTML = `<tr><td colspan="8" class="empty">No ${retailBillingMode === "dressed" ? "dressed" : "regular"} bills for this date</td></tr>`;
+      body.innerHTML = `<tr><td colspan="8" class="empty">No ${isCombinedRetailBillingPage() ? "retail" : (retailBillingMode === "dressed" ? "dressed" : "regular")} bills for this date</td></tr>`;
       return;
     }
 
@@ -1583,19 +1965,25 @@ async function saveDressedStock() {
     const container = document.getElementById("dressedStockRows");
     if (container) container.innerHTML = "";
     addDressedStockRow();
-    await loadDressedStock();
+    if (typeof clearCachedResponsesByPrefix === "function") {
+      clearCachedResponsesByPrefix("/dressed-stock");
+    }
+    if (typeof clearOperationalCaches === "function") {
+      clearOperationalCaches();
+    }
+    await loadDressedStock(true);
   } catch (e) {
     console.error(e);
     showToast("Dressed stock save failed");
   }
 }
 
-async function loadDressedStock() {
+async function loadDressedStock(force = false) {
   const date = document.getElementById("retailDate")?.value;
   if (!date) return;
 
   try {
-    const data = await optionalApiCall(`/dressed-stock?date=${encodeURIComponent(date)}`, { entries: [], available_items: [] }, "GET", null, { cache: false });
+    const data = await optionalApiCall(`/dressed-stock?date=${encodeURIComponent(date)}`, { entries: [], available_items: [] }, "GET", null, { cache: !force });
     dressedStockCache = data.available_items || [];
     dressedStockLoadedForDate = date;
     renderSavedDressedStock(data.entries || []);
@@ -1660,7 +2048,7 @@ function startNextPaymentReceipt() {
 }
 
 function startNextRetailBill() {
-  const nextMode = retailBillingMode === "dressed" ? "dressed" : "regular";
+  const nextMode = isCombinedRetailBillingPage() ? "regular" : (retailBillingMode === "dressed" ? "dressed" : "regular");
   const regularDate = retailField("regular", "date");
   const nextDate = regularDate?.value || formatDateInput(new Date());
 
@@ -1687,80 +2075,28 @@ async function printCurrentRetailBill() {
     return;
   }
 
-  const printWindow = window.open("", "_blank", "width=420,height=820");
-  if (!printWindow) {
-    showToast("Allow popups to print bill");
-    return;
+  let printedViaBridge = false;
+  try {
+    await printThroughLocalBridge("/print/retail", buildRetailBridgePayload(bill));
+    printedViaBridge = true;
+    showToast(`Printed bill ${bill.bill_number}`);
+  } catch (e) {
+    console.error("Local retail print bridge failed", e);
+    showToast("Local print bridge unavailable. Using browser print.");
+    printedViaBridge = openRetailBrowserPrintWindow(bill);
   }
-
-  printWindow.document.write(`
-    <html>
-      <head>
-        <title>Retail Bill ${escapeHtml(bill.bill_number)}</title>
-        <style>
-          @page { size: 80mm auto; margin: 0; }
-          body { margin: 0; font-family: "Courier New", monospace; background: white; color: #111; }
-          .bill { width: 76mm; margin: 0 auto; padding: 4mm 2.5mm 5mm; }
-          .thermal-bill { width: 100%; color: #111; }
-          .thermal-label, .thermal-header-mini, .thermal-rule, .thermal-note-mini { text-align: center; }
-          .thermal-label { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; }
-          .thermal-center { text-align: center; }
-          .thermal-center h3 { margin: 2px 0 3px; font-size: 18px; line-height: 1.1; }
-          .thermal-center p { margin: 1px 0; font-size: 11px; line-height: 1.25; }
-          .thermal-header-mini { margin-top: 2px; font-size: 10px; }
-          .thermal-meta-grid { margin-top: 7px; font-size: 11px; }
-          .thermal-meta-row { display: flex; justify-content: space-between; gap: 8px; margin: 1px 0; }
-          .thermal-customer { margin-top: 6px; font-size: 11px; }
-          .thermal-customer p { margin: 1px 0; }
-          .thermal-rule { margin: 2px 0 0; font-size: 10px; letter-spacing: 0; }
-          .thermal-items-table { width: 100% !important; min-width: 0 !important; max-width: 100% !important; border-collapse: collapse; table-layout: fixed; font-size: 9px; }
-          .thermal-items-table th, .thermal-items-table td { padding: 2px 0; vertical-align: top; white-space: nowrap; overflow: hidden; text-overflow: clip; }
-          .thermal-items-table th { font-weight: 700; }
-          .thermal-items-table th:nth-child(1), .thermal-items-table td:nth-child(1) { width: 6%; text-align: left; }
-          .thermal-items-table th:nth-child(2), .thermal-items-table td:nth-child(2) { width: 30%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-          .thermal-items-table th:nth-child(3), .thermal-items-table td:nth-child(3) { width: 15%; text-align: right; padding-right: 6px; }
-          .thermal-items-table th:nth-child(4), .thermal-items-table td:nth-child(4) { width: 17%; text-align: right; padding-left: 6px; padding-right: 4px; }
-          .thermal-items-table th:nth-child(5), .thermal-items-table td:nth-child(5) { width: 14%; text-align: right; }
-          .thermal-items-table th:nth-child(6), .thermal-items-table td:nth-child(6) { width: 18%; text-align: right; }
-          .thermal-items-table.thermal-items-table-dressed th:nth-child(1), .thermal-items-table.thermal-items-table-dressed td:nth-child(1) { width: 8%; }
-          .thermal-items-table.thermal-items-table-dressed th:nth-child(2), .thermal-items-table.thermal-items-table-dressed td:nth-child(2) { width: 38%; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-          .thermal-items-table.thermal-items-table-dressed th:nth-child(3), .thermal-items-table.thermal-items-table-dressed td:nth-child(3) { width: 18%; text-align: right; }
-          .thermal-items-table.thermal-items-table-dressed th:nth-child(4), .thermal-items-table.thermal-items-table-dressed td:nth-child(4) { width: 16%; text-align: right; }
-          .thermal-items-table.thermal-items-table-dressed th:nth-child(5), .thermal-items-table.thermal-items-table-dressed td:nth-child(5) { width: 20%; text-align: right; }
-          .thermal-section-row td { padding-top: 5px; font-weight: 700; border-top: 1px dashed #a8adb7; }
-          .thermal-summary { margin-top: 1px; font-size: 11px; }
-          .thermal-summary p, .thermal-summary-row { display: flex; justify-content: space-between; gap: 10px; margin: 2px 0; }
-          .thermal-summary-compact { margin-bottom: 2px; }
-          .thermal-totals-table { margin-top: 1px; }
-          .thermal-total-row td { padding-top: 3px; font-size: 11px; font-weight: 700; border-top: none; }
-          .thermal-total-row td:first-child { text-align: left; }
-          .thermal-total { margin-top: 4px; padding-top: 4px; border-top: 1px dashed #666; font-weight: 700; }
-          .thermal-notes, .thermal-note-mini { margin-top: 6px; font-size: 10px; line-height: 1.25; }
-          .thermal-footer { margin-top: 10px; text-align: center; font-size: 11px; }
-          .thermal-footer p { margin: 1px 0; }
-        </style>
-      </head>
-      <body>
-        <div class="bill">${getRetailReceiptMarkup(bill)}</div>
-        <script>
-          window.onload = function () {
-            window.print();
-            setTimeout(function () { window.close(); }, 250);
-          };
-        </script>
-      </body>
-    </html>
-  `);
-  printWindow.document.close();
 
   currentRetailBill = bill;
   retailDraftDirty = false;
   retailBillCompleted = true;
-  startNextRetailBill();
+  if (printedViaBridge) {
+    startNextRetailBill();
+  }
 }
 
 function getRetailBillShareText(bill) {
   const lines = [];
+  const paymentBreakdown = normalizeRetailPaymentBreakdown(bill);
   lines.push(`${RETAIL_SHOP_PROFILE.name}`);
   lines.push(`Bill No: ${bill.bill_number}`);
   lines.push(`Date: ${formatDisplayDate(bill.date)}`);
@@ -1791,15 +2127,20 @@ function getRetailBillShareText(bill) {
   const receiptOutstanding = bill.customer_name
     ? Number((bill.party_balance ?? bill.outstanding_amount) || 0)
     : Number(bill.outstanding_amount || 0);
+  const previousBalance = Math.max(0, receiptOutstanding - Number(bill.outstanding_amount || 0));
+  lines.push(`Old Balance: Rs ${formatBillMoney(previousBalance)}`);
+  lines.push(`Total NAG: ${formatBillNag(bill.total_nag || bill.total_quantity || 0)}`);
+  lines.push(`Total KGS: ${Number(bill.total_weight || 0).toFixed(3)}`);
   lines.push(`Total Amount: Rs ${formatBillMoney(bill.total_amount)}`);
   lines.push(`Received: Rs ${formatBillMoney(bill.paid_amount)}`);
-  lines.push(`Remaining: Rs ${formatBillMoney(receiptOutstanding)}`);
-  if (Array.isArray(bill.payment_breakdown) && bill.payment_breakdown.length) {
-    bill.payment_breakdown.forEach(entry => {
-      lines.push(`${entry.mode}: Rs ${formatBillMoney(entry.amount)}`);
+  lines.push(`Active Balance: Rs ${formatBillMoney(receiptOutstanding)}`);
+  if (paymentBreakdown.length > 1) {
+    paymentBreakdown.forEach(entry => {
+      lines.push(`${getRetailPaymentModeLabel(entry.mode)}: Rs ${formatBillMoney(entry.amount)}`);
     });
+    lines.push(`Mode: ${formatRetailPaymentSummary(summarizeRetailPaymentModes(paymentBreakdown, bill.outstanding_amount))}`);
   } else {
-    lines.push(`Mode: ${bill.payment_mode || "Cash"}`);
+    lines.push(`Mode: ${formatRetailPaymentSummary(bill.payment_mode || "Cash")}`);
   }
   if (bill.notes) {
     lines.push(`Notes: ${bill.notes}`);
@@ -1831,7 +2172,7 @@ async function sendCurrentRetailBill() {
     if (navigator.canShare && navigator.share && navigator.canShare({ files: [imageFile] })) {
       await navigator.share({
         title: `Retail Bill ${bill.bill_number}`,
-        text: `Retail bill ${bill.bill_number}`,
+        text: shareText,
         files: [imageFile]
       });
       showToast("Bill image shared");
@@ -1847,7 +2188,9 @@ async function sendCurrentRetailBill() {
         console.error("Clipboard copy failed", e);
       }
     }
-    const whatsappTarget = customerPhone ? `https://wa.me/${customerPhone}` : `https://wa.me/`;
+    const whatsappTarget = customerPhone
+      ? `https://wa.me/${customerPhone}?text=${encodeURIComponent(shareText)}`
+      : `https://wa.me/?text=${encodeURIComponent(shareText)}`;
     window.open(whatsappTarget, "_blank", "noopener,noreferrer");
     showToast("Receipt image downloaded. Attach it in WhatsApp.");
     startNextRetailBill();
@@ -1897,40 +2240,23 @@ async function printCurrentPaymentReceipt() {
     return;
   }
 
-  const printWindow = window.open("", "_blank", "width=420,height=820");
-  if (!printWindow) {
-    showToast("Allow popups to print receipt");
-    return;
+  let printedViaBridge = false;
+  try {
+    await printThroughLocalBridge("/print/payment-receipt", buildPaymentReceiptBridgePayload(receipt));
+    printedViaBridge = true;
+    showToast(`Printed receipt ${receipt.receipt_number}`);
+  } catch (e) {
+    console.error("Local payment receipt print bridge failed", e);
+    showToast("Local print bridge unavailable. Using browser print.");
+    printedViaBridge = openPaymentReceiptBrowserPrintWindow(receipt);
   }
-
-  printWindow.document.write(`
-    <html>
-      <head>
-        <title>Payment Receipt ${escapeHtml(receipt.receipt_number)}</title>
-        <style>
-          @page { size: 80mm auto; margin: 0; }
-          body { margin: 0; font-family: "Courier New", monospace; background: white; color: #111; }
-          .bill { width: 76mm; margin: 0 auto; padding: 4mm 2.5mm 5mm; }
-          .thermal-section-row td { padding-top: 5px; font-weight: 700; border-top: 1px dashed #a8adb7; }
-        </style>
-      </head>
-      <body>
-        <div class="bill">${getPaymentReceiptMarkup(receipt)}</div>
-        <script>
-          window.onload = function () {
-            window.print();
-            setTimeout(function () { window.close(); }, 250);
-          };
-        </script>
-      </body>
-    </html>
-  `);
-  printWindow.document.close();
 
   currentPaymentReceipt = receipt;
   paymentReceiptDraftDirty = false;
   paymentReceiptCompleted = true;
-  startNextPaymentReceipt();
+  if (printedViaBridge) {
+    startNextPaymentReceipt();
+  }
 }
 
 function getPaymentReceiptShareText(receipt) {
@@ -2025,9 +2351,13 @@ async function sendCurrentPaymentReceipt() {
 }
 
 function resetPaymentReceiptForm() {
-  document.getElementById("paymentReceiptPartyName").value = "";
-  document.getElementById("paymentReceiptPartyPhone").value = "";
-  document.getElementById("paymentReceiptPartyAddress").value = "";
+  const paymentName = document.getElementById("paymentReceiptPartyName");
+  const paymentPhone = document.getElementById("paymentReceiptPartyPhone");
+  const paymentAddress = document.getElementById("paymentReceiptPartyAddress");
+  paymentName.value = "";
+  paymentPhone.value = "";
+  paymentAddress.value = "";
+  clearLinkedPartyState(paymentName, paymentPhone, paymentAddress);
   document.getElementById("paymentReceiptAmount").value = "";
   document.getElementById("paymentReceiptNotes").value = "";
   document.getElementById("paymentReceiptDirection").value = "RECEIVED";
@@ -2044,7 +2374,7 @@ function resetPaymentReceiptForm() {
 }
 
 function resetRetailForm() {
-  const draftHasItems = collectRetailItemsFromForm(retailBillingMode).length > 0;
+  const draftHasItems = collectRetailItemsFromForm(isCombinedRetailBillingPage() ? "regular" : retailBillingMode).length > 0;
   if (draftHasItems && !retailBillCompleted) {
     showToast("Save or print this bill before starting a new one");
     return;
@@ -2055,24 +2385,30 @@ function resetRetailForm() {
   if (regularRows) regularRows.innerHTML = "";
   if (dressedRows) dressedRows.innerHTML = "";
 
-  retailField("regular", "customerName").value = "";
-  retailField("regular", "customerPhone").value = "";
-  retailField("regular", "customerAddress").value = "";
+  const customerName = retailField("regular", "customerName");
+  const customerPhone = retailField("regular", "customerPhone");
+  const customerAddress = retailField("regular", "customerAddress");
+  customerName.value = "";
+  customerPhone.value = "";
+  customerAddress.value = "";
+  clearLinkedPartyState(customerName, customerPhone, customerAddress);
   setRetailPartyBalance("regular", 0);
   setRetailPartyBalance("dressed", 0);
   retailField("regular", "iceAmount").value = "";
+  retailField("regular", "secondaryPaymentMode").value = "";
+  retailField("regular", "secondaryPaidAmount").value = "";
   retailField("regular", "paidAmount").value = "";
   retailField("regular", "notes").value = "";
   retailField("regular", "settlementType").value = "paid";
   retailField("regular", "paymentMode").value = "Cash";
   retailField("regular", "cashier").value = "admin";
   retailField("regular", "date").value = formatDateInput(new Date());
-  const paymentRows = document.getElementById("retailPaymentBreakdownRows");
-  if (paymentRows) paymentRows.innerHTML = "";
-  addRetailPaymentRow(null, { skipDirty: true });
   syncRetailSettlementUi();
 
-  if (retailBillingMode === "dressed") {
+  if (isCombinedRetailBillingPage()) {
+    addRegularRetailRow();
+    addDressedRetailRow();
+  } else if (retailBillingMode === "dressed") {
     addDressedRetailRow();
   } else {
     addRegularRetailRow();
@@ -2226,8 +2562,10 @@ async function hydrateRetailCustomerProfile(name, mode = retailBillingMode) {
     if (cachedParty) {
       const phoneInput = retailField(mode, "customerPhone");
       const addressInput = retailField(mode, "customerAddress");
-      if (phoneInput && !phoneInput.value.trim()) phoneInput.value = cachedParty.phone || "";
-      if (addressInput && !addressInput.value.trim()) addressInput.value = cachedParty.address || "";
+      if (phoneInput) phoneInput.value = cachedParty.phone || "";
+      if (addressInput) addressInput.value = cachedParty.address || "";
+      storeLinkedPartyState(retailField(mode, "customerName"), phoneInput, addressInput, cachedParty);
+      setRetailPartyBalance(mode, cachedParty.balance_after ?? cachedParty.party_balance ?? 0);
       scheduleRetailPreviewRender();
       return;
     }
@@ -2243,8 +2581,9 @@ async function hydrateRetailCustomerProfile(name, mode = retailBillingMode) {
 
     const phoneInput = retailField(mode, "customerPhone");
     const addressInput = retailField(mode, "customerAddress");
-    if (phoneInput && !phoneInput.value.trim()) phoneInput.value = party.phone || "";
-    if (addressInput && !addressInput.value.trim()) addressInput.value = party.address || "";
+    if (phoneInput) phoneInput.value = party.phone || "";
+    if (addressInput) addressInput.value = party.address || "";
+    storeLinkedPartyState(retailField(mode, "customerName"), phoneInput, addressInput, party);
     setRetailPartyBalance(mode, party.balance_after ?? 0);
     scheduleRetailPreviewRender();
   } catch (e) {
@@ -2262,8 +2601,9 @@ async function hydratePaymentReceiptPartyProfile(name) {
     if (cachedParty) {
       const phoneInput = document.getElementById("paymentReceiptPartyPhone");
       const addressInput = document.getElementById("paymentReceiptPartyAddress");
-      if (phoneInput && !phoneInput.value.trim()) phoneInput.value = cachedParty.phone || "";
-      if (addressInput && !addressInput.value.trim()) addressInput.value = cachedParty.address || "";
+      if (phoneInput) phoneInput.value = cachedParty.phone || "";
+      if (addressInput) addressInput.value = cachedParty.address || "";
+      storeLinkedPartyState(document.getElementById("paymentReceiptPartyName"), phoneInput, addressInput, cachedParty);
       schedulePaymentReceiptPreviewRender();
       return;
     }
@@ -2274,8 +2614,9 @@ async function hydratePaymentReceiptPartyProfile(name) {
 
     const phoneInput = document.getElementById("paymentReceiptPartyPhone");
     const addressInput = document.getElementById("paymentReceiptPartyAddress");
-    if (phoneInput && !phoneInput.value.trim()) phoneInput.value = party.phone || "";
-    if (addressInput && !addressInput.value.trim()) addressInput.value = party.address || "";
+    if (phoneInput) phoneInput.value = party.phone || "";
+    if (addressInput) addressInput.value = party.address || "";
+    storeLinkedPartyState(document.getElementById("paymentReceiptPartyName"), phoneInput, addressInput, party);
     schedulePaymentReceiptPreviewRender();
   } catch (e) {
     console.error(e);
@@ -2314,6 +2655,8 @@ function getThermalReceiptShareStyles() {
     .thermal-meta-row, .thermal-summary p { display: flex; justify-content: space-between; gap: 8px; margin: 2px 0; font-size: 11px; }
     .thermal-summary { margin-top: 1px; }
     .thermal-summary-compact { margin-bottom: 2px; }
+    .thermal-header-title { font-weight: 700; letter-spacing: 0.08em; }
+    .thermal-balance-summary { margin-top: 4px; }
     .thermal-totals-table { margin-top: 1px; }
     .thermal-total-row td { padding-top: 3px; font-size: 11px; font-weight: 700; border-top: none; }
     .thermal-total-row td:first-child { text-align: left; }
@@ -2339,6 +2682,11 @@ function getThermalReceiptShareStyles() {
     .thermal-section-row td { padding-top: 5px; font-weight: 700; border-top: 1px dashed #a8adb7; }
     .thermal-total { margin-top: 4px; padding-top: 4px; border-top: 1px dashed #8c98a8; font-weight: 800; }
     .thermal-notes { padding-top: 6px; font-size: 10px; }
+    .thermal-payment-qr { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #8c98a8; text-align: center; }
+    .thermal-payment-qr strong { display: block; margin-bottom: 6px; font-size: 11px; letter-spacing: 0.04em; }
+    .thermal-payment-qr-frame { width: 146px; height: 146px; margin: 0 auto; overflow: hidden; border: 1px solid #d6dce6; border-radius: 4px; background: #fff; padding: 6px; box-sizing: border-box; }
+    .thermal-payment-qr img { display: block; width: 100%; height: 100%; object-fit: contain; object-position: center; image-rendering: crisp-edges; }
+    .thermal-payment-qr-id { margin: 6px 0 0; font-size: 9px; font-weight: 700; letter-spacing: 0.02em; word-break: break-all; }
     .thermal-footer { margin-top: 10px; padding-top: 8px; border-top: 1px dashed #8c98a8; text-align: center; }
     .thermal-footer p { margin: 1px 0; font-size: 11px; }
   `;
@@ -2432,6 +2780,13 @@ function downloadFile(file) {
 
 function getRetailReceiptMarkup(bill) {
   const isDressedOnlyBill = (bill.items || []).length > 0 && (bill.items || []).every(item => (item.line_type || "STANDARD").toUpperCase() === "DRESSED");
+  const receiptOutstanding = bill.customer_name
+    ? Number((bill.party_balance ?? bill.outstanding_amount) || 0)
+    : Number(bill.outstanding_amount || 0);
+  const previousBalance = Math.max(0, receiptOutstanding - Number(bill.outstanding_amount || 0));
+  const paymentBreakdown = normalizeRetailPaymentBreakdown(bill);
+  const invoiceType = Number(bill.outstanding_amount || 0) > 0 ? "Credit" : "Cash";
+  const invoiceDateTime = `${formatDisplayDate(bill.date)} ${escapeHtml(bill.time || new Date().toLocaleTimeString("en-GB"))}`;
 
   const renderReceiptRows = (items, sectionLabel, startIndex) => {
     if (!items.length) return "";
@@ -2472,41 +2827,39 @@ function getRetailReceiptMarkup(bill) {
     ${renderReceiptRows(dressedItems, "Dressed Chicken", regularItems.length)}
   `;
 
-  const receiptOutstanding = bill.customer_name
-    ? Number((bill.party_balance ?? bill.outstanding_amount) || 0)
-    : Number(bill.outstanding_amount || 0);
-
   const customerBlock = (bill.customer_name || bill.customer_phone || bill.customer_address) ? `
     <div class="thermal-customer">
-      ${bill.customer_name ? `<p><strong>Customer Name</strong> : ${escapeHtml(bill.customer_name)}</p>` : ""}
-      ${bill.customer_phone ? `<p><strong>Phone</strong> : ${escapeHtml(bill.customer_phone)}</p>` : ""}
-      ${bill.customer_address ? `<p><strong>Customer Add</strong> : ${escapeHtml(bill.customer_address)}</p>` : ""}
+      ${bill.customer_name ? `<p><strong>Customer</strong>: ${escapeHtml(bill.customer_name)}</p>` : ""}
+      ${bill.customer_phone ? `<p><strong>Mobile No</strong>: ${escapeHtml(bill.customer_phone)}</p>` : ""}
+      ${bill.customer_address ? `<p><strong>Address</strong>: ${escapeHtml(bill.customer_address)}</p>` : ""}
     </div>
   ` : "";
-  const paymentBreakdown = Array.isArray(bill.payment_breakdown) ? bill.payment_breakdown.filter(entry => Number(entry.amount || 0) > 0) : [];
-  const paymentBreakdownHtml = paymentBreakdown.map(entry => (
-    `<p><span>${escapeHtml(entry.mode || "Cash")} Payment</span><strong>${formatBillMoney(entry.amount)}</strong></p>`
-  )).join("");
+  const paymentRows = paymentBreakdown.length
+    ? paymentBreakdown.map(entry => `
+        <p><span>${escapeHtml(getRetailPaymentModeLabel(entry.mode))} Payment</span><strong>${formatBillMoney(entry.amount)}</strong></p>
+      `).join("")
+    : `<p><span>${escapeHtml(formatRetailPaymentSummary(bill.payment_mode || "Cash"))} Payment</span><strong>${formatBillMoney(bill.paid_amount)}</strong></p>`;
 
   return `
     <div class="thermal-bill">
-      <div class="thermal-label">INVOICE</div>
       <div class="thermal-center">
         <h3>${escapeHtml(RETAIL_SHOP_PROFILE.name)}</h3>
         <p>${escapeHtml(RETAIL_SHOP_PROFILE.proprietor)}</p>
         <p>${escapeHtml(RETAIL_SHOP_PROFILE.address)}</p>
         <p>Mob. ${escapeHtml(RETAIL_SHOP_PROFILE.phone)}</p>
       </div>
+      <div class="thermal-rule">----------------------------------------------</div>
+      <div class="thermal-header-mini thermal-header-title">TAX INVOICE</div>
 
       <div class="thermal-meta-grid">
-        <div class="thermal-meta-row"><span>Bill no</span><span>${escapeHtml(bill.bill_number)}</span></div>
-        <div class="thermal-meta-row"><span>Date</span><span>${formatDisplayDate(bill.date)}</span></div>
-        <div class="thermal-meta-row"><span>Time</span><span>${escapeHtml(bill.time || new Date().toLocaleTimeString("en-GB"))}</span></div>
+        <div class="thermal-meta-row"><span><strong>Invoice No</strong>: ${escapeHtml(bill.bill_number)}</span><span><strong>Type</strong>: ${invoiceType}</span></div>
+        <div class="thermal-meta-row"><span><strong>Date</strong>: ${invoiceDateTime}</span><span></span></div>
         <div class="thermal-meta-row"><span>Cashier</span><span>${escapeHtml(bill.cashier_name || "admin")}</span></div>
       </div>
 
       ${customerBlock}
 
+      <div class="thermal-rule">----------------------------------------------</div>
       <table class="thermal-items-table${isDressedOnlyBill ? " thermal-items-table-dressed" : ""}">
         <thead>
           <tr>
@@ -2555,17 +2908,31 @@ function getRetailReceiptMarkup(bill) {
         </tbody>
       </table>
       <div class="thermal-summary${Number(bill.ice_amount || 0) <= 0 ? " thermal-summary-compact" : ""}">
+        <p><span>Subtotal</span><strong>${formatBillMoney(bill.items_subtotal_amount ?? (Number(bill.total_amount || 0) - Number(bill.ice_amount || 0)))}</strong></p>
         ${Number(bill.ice_amount || 0) > 0 ? `<p><span>Items Total</span><strong>${formatBillMoney(bill.items_subtotal_amount ?? (Number(bill.total_amount || 0) - Number(bill.ice_amount || 0)))}</strong></p>` : ""}
         ${Number(bill.ice_amount || 0) > 0 ? `<p><span>Ice Amount</span><strong>${formatBillMoney(bill.ice_amount)}</strong></p>` : ""}
-        ${Number(bill.ice_amount || 0) > 0 ? `<p class="thermal-total"><span>TOTAL</span><strong>${formatBillMoney(bill.total_amount)}</strong></p>` : ""}
-        ${paymentBreakdownHtml || `<p><span>${escapeHtml(bill.payment_mode || "Cash")} Payment</span><strong>${formatBillMoney(bill.paid_amount)}</strong></p>`}
-        <p><span>Outstanding balance</span><strong>${formatBillMoney(receiptOutstanding)}</strong></p>
+        <p class="thermal-total"><span>Total</span><strong>${formatBillMoney(bill.total_amount)}</strong></p>
+      </div>
+      <div class="thermal-rule">----------------------------------------------</div>
+      <div class="thermal-summary thermal-balance-summary">
+        <p><span>Old Balance</span><strong>${formatBillMoney(previousBalance)}</strong></p>
+        ${paymentRows}
+        <p><span>Mode</span><strong>${escapeHtml(formatRetailPaymentSummary(summarizeRetailPaymentModes(paymentBreakdown, bill.outstanding_amount) || bill.payment_mode || "Cash"))}</strong></p>
+        <p><span>Active Balance</span><strong>${formatBillMoney(receiptOutstanding)}</strong></p>
       </div>
 
       ${bill.requires_customer && !bill.customer_name ? `<div class="thermal-notes">Known customer name is required when this bill has credit outstanding.</div>` : ""}
       ${bill.notes ? `<div class="thermal-notes">${escapeHtml(bill.notes)}</div>` : ""}
+      <div class="thermal-payment-qr">
+        <strong>${escapeHtml(RETAIL_PAYMENT_QR_VIEW.label)}</strong>
+        <div class="thermal-payment-qr-frame">
+          <img src="${escapeHtml(RETAIL_PAYMENT_QR_VIEW.imageSrc)}" alt="Payment QR">
+        </div>
+        <p class="thermal-payment-qr-id">${escapeHtml(RETAIL_PAYMENT_QR_VIEW.upiId)}</p>
+      </div>
 
       <div class="thermal-footer">
+        <p>Created By: ${escapeHtml(bill.cashier_name || "admin")}</p>
         <p>Thank You</p>
         <p>Visit Again</p>
       </div>
@@ -2676,7 +3043,7 @@ function queueRetailBillForSync(draft) {
     local_only: true,
     sync_status: "Pending Sync",
     payment_mode: draft.payment_mode || "Cash",
-    payment_breakdown: Array.isArray(draft.payment_breakdown) ? draft.payment_breakdown : [],
+    payment_breakdown: normalizeRetailPaymentBreakdown(draft),
     pending_since: new Date().toISOString(),
     last_error: "No internet connection"
   };
@@ -2693,32 +3060,6 @@ function shouldQueueRetailOffline(error) {
   return message.includes("Network") || message.includes("fetch");
 }
 
-function hasRetailSyncAuth() {
-  try {
-    return Boolean(localStorage.getItem("STOCKPILOT_AUTH_TOKEN"));
-  } catch (e) {
-    return false;
-  }
-}
-
-function retailSyncAuthMessage() {
-  return "Please login again to sync saved bills";
-}
-
-function getRetailSyncDebugState() {
-  const pendingBills = getPendingRetailBills();
-  return {
-    version: RETAIL_SYNC_DEBUG_VERSION,
-    online: navigator.onLine ? "online" : "offline",
-    hasAuth: hasRetailSyncAuth() ? "yes" : "no",
-    pending: pendingBills.length
-  };
-}
-
-function setRetailLastSyncStage(message = "") {
-  retailLastSyncStage = message;
-}
-
 function computeNextRetailBillNumber(date, baseline = "1") {
   const pendingBills = getPendingRetailBills();
   const maxPending = pendingBills.reduce((maxValue, bill) => {
@@ -2730,49 +3071,151 @@ function computeNextRetailBillNumber(date, baseline = "1") {
   return String(Math.max(baseValue, maxPending + 1));
 }
 
-function retailBillFingerprint(bill) {
-  const totalAmount = Number(bill?.total_amount || 0).toFixed(2);
-  const customerName = String(bill?.customer_name || "").trim().toLowerCase();
-  const mode = normalizeRetailBillMode(bill);
-  return [
-    String(bill?.date || ""),
-    String(bill?.bill_number || ""),
-    customerName,
-    totalAmount,
-    mode
-  ].join("|");
-}
-
-function reconcilePendingRetailBillsWithServer(serverBills = []) {
-  const pendingBills = getPendingRetailBills();
-  if (!pendingBills.length || !serverBills.length) return pendingBills;
-
-  const serverFingerprints = new Set(serverBills.map(retailBillFingerprint));
-  const remainingPending = pendingBills.filter(bill => !serverFingerprints.has(retailBillFingerprint(bill)));
-
-  if (remainingPending.length !== pendingBills.length) {
-    setPendingRetailBills(remainingPending);
-  }
-
-  return remainingPending;
-}
-
 function mergeRetailBillResults(serverBills, pendingBills) {
-  const serverFingerprints = new Set(serverBills.map(retailBillFingerprint));
-  const uniquePending = pendingBills.filter(bill => !serverFingerprints.has(retailBillFingerprint(bill)));
-  const merged = [...uniquePending, ...serverBills];
+  const merged = [...pendingBills, ...serverBills];
   return merged.sort((a, b) => {
     if ((a.date || "") !== (b.date || "")) return (b.date || "").localeCompare(a.date || "");
     return Number(String(b.bill_number || "").replace(/\D/g, "")) - Number(String(a.bill_number || "").replace(/\D/g, ""));
   });
 }
 
+function normalizeRetailBillFingerprintValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeRetailBillNumberValue(value) {
+  return String(value || "").trim();
+}
+
+function normalizeRetailBillNumericValue(value, decimals = 2) {
+  return Number(value || 0).toFixed(decimals);
+}
+
+function normalizeRetailBillLineTypeValue(value) {
+  return String(value || "STANDARD").trim().toUpperCase();
+}
+
+function normalizeRetailBillItemNameValue(value) {
+  return normalizeRetailBillFingerprintValue(value).replace(/\s+/g, " ");
+}
+
+function retailBillLineSignature(item) {
+  return [
+    normalizeRetailBillLineTypeValue(item?.line_type),
+    normalizeRetailBillItemNameValue(item?.item_name),
+    normalizeRetailBillNumericValue(item?.quantity ?? item?.nag ?? 0, 3),
+    normalizeRetailBillFingerprintValue(item?.unit || ""),
+    normalizeRetailBillNumericValue(item?.weight || 0, 3),
+    normalizeRetailBillNumericValue(item?.rate || 0, 3),
+    normalizeRetailBillNumericValue(item?.amount || 0, 2)
+  ].join("|");
+}
+
+function retailBillItemsSignature(bill) {
+  const items = Array.isArray(bill?.items) ? [...bill.items] : [];
+  return items
+    .sort((a, b) => Number(a?.line_order || 0) - Number(b?.line_order || 0))
+    .map(retailBillLineSignature)
+    .join("||");
+}
+
+function retailBillSummarySignature(bill) {
+  return [
+    String(bill?.date || ""),
+    normalizeRetailBillNumberValue(bill?.bill_number),
+    normalizeRetailBillFingerprintValue(bill?.customer_name),
+    normalizeRetailBillFingerprintValue(bill?.customer_phone).replace(/\D/g, ""),
+    normalizeRetailBillMode(bill),
+    normalizeRetailBillNumericValue(bill?.total_amount || 0, 2),
+    normalizeRetailBillNumericValue(bill?.paid_amount || 0, 2),
+    normalizeRetailBillNumericValue(bill?.outstanding_amount || 0, 2),
+    normalizeRetailBillNumericValue(bill?.ice_amount || 0, 2),
+    normalizeRetailBillNumericValue(bill?.total_quantity ?? bill?.total_nag ?? 0, 3),
+    normalizeRetailBillNumericValue(bill?.total_weight || 0, 3),
+    String(Array.isArray(bill?.items) ? bill.items.length : 0)
+  ].join("|");
+}
+
+function retailBillFingerprintParts(bill) {
+  return {
+    date: String(bill?.date || ""),
+    billNumber: normalizeRetailBillNumberValue(bill?.bill_number),
+    customerName: normalizeRetailBillFingerprintValue(bill?.customer_name),
+    customerPhone: normalizeRetailBillFingerprintValue(bill?.customer_phone).replace(/\D/g, ""),
+    totalAmount: normalizeRetailBillNumericValue(bill?.total_amount || 0, 2),
+    paidAmount: normalizeRetailBillNumericValue(bill?.paid_amount || 0, 2),
+    outstandingAmount: normalizeRetailBillNumericValue(bill?.outstanding_amount || 0, 2),
+    totalNag: normalizeRetailBillNumericValue(bill?.total_quantity ?? bill?.total_nag ?? 0, 3),
+    totalWeight: normalizeRetailBillNumericValue(bill?.total_weight || 0, 3),
+    iceAmount: normalizeRetailBillNumericValue(bill?.ice_amount || 0, 2),
+    mode: normalizeRetailBillMode(bill),
+    itemSignature: retailBillItemsSignature(bill),
+    summarySignature: retailBillSummarySignature(bill)
+  };
+}
+
+function retailBillsMatchByFingerprint(localBill, remoteBill) {
+  const local = retailBillFingerprintParts(localBill);
+  const remote = retailBillFingerprintParts(remoteBill);
+
+  if (local.date !== remote.date || local.billNumber !== remote.billNumber) {
+    return false;
+  }
+
+  if (local.itemSignature && remote.itemSignature && local.itemSignature === remote.itemSignature) {
+    return local.summarySignature === remote.summarySignature
+      || (
+        local.totalAmount === remote.totalAmount
+        && local.paidAmount === remote.paidAmount
+        && local.outstandingAmount === remote.outstandingAmount
+        && local.mode === remote.mode
+      );
+  }
+
+  if (local.summarySignature === remote.summarySignature) {
+    return true;
+  }
+
+  const customerMatches = !!local.customerName && local.customerName === remote.customerName;
+  const phoneMatches = !!local.customerPhone && local.customerPhone === remote.customerPhone;
+  return (
+    local.totalAmount === remote.totalAmount
+    && local.paidAmount === remote.paidAmount
+    && local.outstandingAmount === remote.outstandingAmount
+    && local.totalNag === remote.totalNag
+    && local.totalWeight === remote.totalWeight
+    && local.iceAmount === remote.iceAmount
+    && local.mode === remote.mode
+    && (customerMatches || phoneMatches || (!local.customerName && !remote.customerName))
+  );
+}
+
+async function findMatchingRemoteRetailBill(pendingBill) {
+  if (!pendingBill?.date || !pendingBill?.bill_number) return null;
+  const response = await apiCall(`/retail-bills?date=${encodeURIComponent(pendingBill.date)}`, "GET", null, {}, { loader: false });
+  const results = Array.isArray(response?.results) ? response.results : [];
+  const candidates = results.filter(serverBill =>
+    String(serverBill?.date || "") === String(pendingBill.date || "")
+    && normalizeRetailBillNumberValue(serverBill?.bill_number) === normalizeRetailBillNumberValue(pendingBill?.bill_number)
+  );
+
+  if (!candidates.length) return null;
+
+  for (const candidate of candidates) {
+    const details = await apiCall(`/retail-bills/${candidate.id}`, "GET", null, {}, { loader: false });
+    if (!details?.error && retailBillsMatchByFingerprint(pendingBill, details)) {
+      return details;
+    }
+  }
+
+  return null;
+}
+
 function renderRetailOfflineBanner() {
   const banner = document.getElementById("retailOfflineBanner");
   if (!banner) return;
 
-  const pendingBills = getPendingRetailBills();
-  const pendingCount = pendingBills.length;
+  const pendingCount = getPendingRetailBills().length;
   if (navigator.onLine && pendingCount === 0) {
     banner.style.display = "none";
     banner.innerHTML = "";
@@ -2782,31 +3225,11 @@ function renderRetailOfflineBanner() {
   const statusText = navigator.onLine
     ? `${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} waiting to sync.`
     : `Offline mode. ${pendingCount} retail bill${pendingCount === 1 ? "" : "s"} saved locally.`;
-  const needsAuth = navigator.onLine && pendingCount > 0 && !hasRetailSyncAuth();
-  const failedBill = pendingBills.find(bill => bill.last_error);
-  const failureMessage = needsAuth
-    ? retailSyncAuthMessage()
-    : (failedBill?.last_error || "");
-  const failureText = failureMessage
-    ? `<p class="offline-banner-error">Last sync issue: ${escapeHtml(failureMessage)}</p>`
-    : "";
-  const debug = getRetailSyncDebugState();
-  const debugText = `
-    <p class="offline-banner-debug">
-      Sync status: ${escapeHtml(debug.version)} | ${escapeHtml(debug.online)} | login ${escapeHtml(debug.hasAuth)} | pending ${escapeHtml(String(debug.pending))}
-    </p>
-  `;
-  const stageText = retailLastSyncStage
-    ? `<p class="offline-banner-debug">Sync step: ${escapeHtml(retailLastSyncStage)}</p>`
-    : "";
 
   banner.className = `notice ${navigator.onLine ? "warning" : "info"}`;
   banner.style.display = "block";
   banner.innerHTML = `
     <strong>${statusText}</strong>
-    ${failureText}
-    ${debugText}
-    ${stageText}
     <div class="offline-banner-actions">
       <button type="button" onclick="syncPendingRetailBills()">${navigator.onLine ? "Sync Now" : "Retry When Online"}</button>
     </div>
@@ -2815,41 +3238,13 @@ function renderRetailOfflineBanner() {
 
 async function syncPendingRetailBills(silent = false) {
   if (!navigator.onLine) {
-    setRetailLastSyncStage("offline");
     renderRetailOfflineBanner();
     return;
   }
 
   const pendingBills = getPendingRetailBills();
   if (!pendingBills.length) {
-    setRetailLastSyncStage("no pending bills");
     renderRetailOfflineBanner();
-    return;
-  }
-
-  if (!hasRetailSyncAuth()) {
-    const authError = retailSyncAuthMessage();
-    setRetailLastSyncStage("missing login token");
-    setPendingRetailBills(pendingBills.map(bill => ({ ...bill, last_error: authError })));
-    renderRetailOfflineBanner();
-    if (!silent) showToast(authError);
-    return;
-  }
-
-  setRetailLastSyncStage("checking server");
-  renderRetailOfflineBanner();
-
-  try {
-    await apiCall("/healthz", "GET", null, {}, { loader: false, cache: false });
-    setRetailLastSyncStage("server reachable");
-    renderRetailOfflineBanner();
-    await apiCall("/auth/me", "GET", null, {}, { loader: false, cache: false });
-    setRetailLastSyncStage("session verified");
-    renderRetailOfflineBanner();
-  } catch (e) {
-    setRetailLastSyncStage(`pre-check failed: ${String(e?.message || e || "unknown error")}`);
-    renderRetailOfflineBanner();
-    if (!silent) showToast(String(e?.message || e || "Sync failed"));
     return;
   }
 
@@ -2858,8 +3253,6 @@ async function syncPendingRetailBills(silent = false) {
 
   for (const bill of pendingBills) {
     try {
-      setRetailLastSyncStage(`posting bill ${bill.bill_number || ""}`.trim());
-      renderRetailOfflineBanner();
       const response = await apiCall("/retail-bills", "POST", JSON.stringify({
         date: bill.date,
         bill_number: bill.bill_number,
@@ -2867,8 +3260,8 @@ async function syncPendingRetailBills(silent = false) {
         customer_name: bill.customer_name,
         customer_phone: bill.customer_phone,
         customer_address: bill.customer_address,
-        payment_mode: bill.payment_mode,
-        payment_breakdown: bill.payment_breakdown,
+        payment_mode: normalizeRetailPaymentBreakdown(bill)[0]?.mode || "Cash",
+        payment_breakdown: normalizeRetailPaymentBreakdown(bill),
         paid_amount: bill.paid_amount,
         ice_amount: bill.ice_amount,
         notes: bill.notes,
@@ -2876,22 +3269,10 @@ async function syncPendingRetailBills(silent = false) {
       }), { "Content-Type": "application/json" }, { loader: false });
 
       if (response?.error) {
-        if (String(response.error).toLowerCase().includes("bill number already exists")) {
-          const lookup = await optionalApiCall(
-            `/retail-bills?date=${encodeURIComponent(bill.date || "")}`,
-            { results: [] },
-            "GET",
-            null,
-            { cache: false }
-          );
-          const existingBill = (lookup.results || []).find(serverBill => retailBillFingerprint(serverBill) === retailBillFingerprint(bill));
+        if (String(response.error || "").toLowerCase().includes("already exists")) {
+          const existingBill = await findMatchingRemoteRetailBill(bill);
           if (existingBill) {
             syncedCount += 1;
-            setRetailLastSyncStage(`bill ${bill.bill_number || ""} already on server`.trim());
-            if (currentRetailBill?.id === bill.id) {
-              currentRetailBill = existingBill;
-              populateRetailFormFromBill(existingBill);
-            }
             continue;
           }
         }
@@ -2903,29 +3284,23 @@ async function syncPendingRetailBills(silent = false) {
         currentRetailBill = response.bill;
         populateRetailFormFromBill(response.bill);
       }
+      if (typeof clearCachedResponsesByPrefix === "function") {
+        clearCachedResponsesByPrefix("/retail-bills");
+      }
       syncedCount += 1;
-      setRetailLastSyncStage(`bill ${bill.bill_number || ""} synced`.trim());
     } catch (e) {
-      const rawError = String(e?.message || e || "Sync failed");
-      const friendlyError = /auth_required|authentication required/i.test(rawError)
-        ? retailSyncAuthMessage()
-        : rawError;
-      setRetailLastSyncStage(`post failed: ${friendlyError}`);
-      remaining.push({ ...bill, last_error: friendlyError });
+      remaining.push({ ...bill, last_error: String(e?.message || e || "Sync failed") });
     }
   }
 
   setPendingRetailBills(remaining);
   renderRetailOfflineBanner();
-  await loadRetailBills();
+  await loadRetailBills(true);
   await refreshRetailBillNumber();
-  await loadDressedStock();
+  await loadDressedStock(true);
 
   if (!silent && syncedCount > 0) {
     showToast(`${syncedCount} offline retail bill${syncedCount === 1 ? "" : "s"} synced`);
-  } else if (!silent && remaining.length > 0) {
-    const firstError = remaining.find(bill => bill.last_error)?.last_error || "Sync failed";
-    showToast(firstError);
   }
 }
 
@@ -2944,7 +3319,8 @@ function attachRetailConnectivityListeners() {
 }
 
 function formatRetailBillMode(bill) {
-  const mode = normalizeRetailBillMode(bill) === "dressed" ? "Dressed" : "Regular";
+  const normalizedMode = normalizeRetailBillMode(bill);
+  const mode = normalizedMode === "dressed" ? "Dressed" : normalizedMode === "both" ? "Regular + Dressed" : "Regular";
   return bill.local_only ? `${mode} • Pending` : mode;
 }
 

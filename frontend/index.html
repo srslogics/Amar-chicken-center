@@ -3,11 +3,17 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#b7791f">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="KNP Signature">
 
-  <title>Amar Signature</title>
+  <title>KNP Signature | Finance Console</title>
 
   <!-- Favicon -->
-  <link rel="icon" href="assets/srs-logics-logo-small.png?v=20260511-12">
+  <link rel="icon" href="assets/srs-logics-logo-small.png?v=20260515-1">
+  <link rel="apple-touch-icon" href="assets/srs-logics-logo.png?v=20260515-1">
+  <link rel="manifest" href="manifest.webmanifest?v=20260608-1">
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,7 +21,7 @@
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Cormorant+Garamond:wght@600;700&display=swap" rel="stylesheet">
 
   <!-- Styles -->
-  <link rel="stylesheet" href="css/style.css?v=20260511-12">
+  <link rel="stylesheet" href="css/style.css?v=20260608-1">
 
   <!-- Charts & icons -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -27,25 +33,46 @@
 
 <div class="app">
 
-  <!-- Sidebar -->
+    <!-- Sidebar -->
   <aside class="sidebar">
     <div class="brand">
       <div>
-        <strong>Amar Signature</strong>
+        <strong>KNP Signature</strong>
         <span>Finance Console</span>
       </div>
     </div>
 
     <nav class="menu" aria-label="Primary navigation">
-      <button type="button" id="menu-dashboard" onclick="loadPage('dashboard')"><i data-lucide="layout-dashboard"></i><span>Dashboard</span></button>
-      <button type="button" id="menu-retail" onclick="loadPage('retail')"><i data-lucide="receipt-text"></i><span>Retail Billing</span></button>
-      <button type="button" id="menu-upload" onclick="loadPage('upload')"><i data-lucide="upload-cloud"></i><span>Upload</span></button>
-      <button type="button" id="menu-analytics" onclick="loadPage('analytics')"><i data-lucide="chart-no-axes-combined"></i><span>Analytics</span></button>
-      <button type="button" id="menu-ledger" onclick="loadPage('ledger')"><i data-lucide="book-open-check"></i><span>Ledger</span></button>
-      <button type="button" id="menu-daily-sheet" onclick="loadPage('daily-sheet')"><i data-lucide="sheet"></i><span>Daily Sheet</span></button>
-      <button type="button" id="menu-access-control" onclick="loadPage('access-control')"><i data-lucide="shield-check"></i><span>Access Control</span></button>
-      <button type="button" id="menu-reports" onclick="loadPage('reports')"><i data-lucide="file-down"></i><span>Reports</span></button>
+      <div class="menu-group">
+        <span class="menu-label">Counter</span>
+        <button type="button" id="menu-dashboard" onclick="loadPage('dashboard')"><i data-lucide="layout-dashboard"></i><span>Dashboard</span></button>
+        <button type="button" id="menu-retail" onclick="loadPage('retail')"><i data-lucide="receipt-text"></i><span>Retail Billing</span></button>
+        <button type="button" id="menu-billing-setup" onclick="loadPage('billing-setup')"><i data-lucide="sliders-horizontal"></i><span>Billing Setup</span></button>
+      </div>
+
+      <div class="menu-group">
+        <span class="menu-label">Stock</span>
+        <button type="button" id="menu-upload" onclick="loadPage('upload')"><i data-lucide="upload-cloud"></i><span>Upload</span></button>
+        <button type="button" id="menu-daily-sheet" onclick="loadPage('daily-sheet')"><i data-lucide="sheet"></i><span>Daily Sheet</span></button>
+      </div>
+
+      <div class="menu-group">
+        <span class="menu-label">Finance</span>
+        <button type="button" id="menu-ledger" onclick="loadPage('ledger')"><i data-lucide="book-open-check"></i><span>Ledger</span></button>
+        <button type="button" id="menu-analytics" onclick="loadPage('analytics')"><i data-lucide="chart-no-axes-combined"></i><span>Analytics</span></button>
+        <button type="button" id="menu-reports" onclick="loadPage('reports')"><i data-lucide="file-down"></i><span>Reports</span></button>
+      </div>
+
+      <div class="menu-group menu-group-admin">
+        <span class="menu-label">Admin</span>
+        <button type="button" id="menu-access-control" onclick="loadPage('access-control')"><i data-lucide="shield-check"></i><span>Access Control</span></button>
+      </div>
     </nav>
+
+    <div class="sidebar-utility">
+      <button type="button" id="installAppButton" class="button-secondary sidebar-install" onclick="promptInstallApp()" style="display:none;">Install App</button>
+      <span class="sidebar-footnote">Counter tools on top, setup tools below.</span>
+    </div>
   </aside>
 
   <!-- Main -->
@@ -54,11 +81,11 @@
     <!-- Topbar -->
     <div class="topbar">
       <div class="top-left">
-        <span class="page-kicker">Amar Signature</span>
         <h1 id="pageTitle">Dashboard</h1>
       </div>
 
       <div class="top-right">
+        <select id="outletSwitcher" onchange="handleOutletChange(this.value)" aria-label="Outlet selector"></select>
         <span id="authMeta"></span>
         <button type="button" id="authButton" onclick="handleAuthButton()">Login</button>
         <span id="todayDate"></span>
@@ -86,15 +113,24 @@
 </div>
 
 <!-- Scripts (order matters) -->
-<script src="js/api.js?v=20260511-12"></script>
-<script src="js/app.js?v=20260511-12"></script>
-<script src="js/upload.js?v=20260511-12"></script>
-<script src="js/dashboard.js?v=20260511-12"></script>
-<script src="js/ledger.js?v=20260511-12"></script>
-<script src="js/analytics.js?v=20260511-12"></script>
-<script src="js/retail.js?v=20260511-12"></script>
-<script src="js/daily-sheet.js?v=20260511-12"></script>
-<script src="js/reports.js?v=20260511-12"></script>
+<script src="js/api.js?v=20260608-1"></script>
+<script src="js/app.js?v=20260608-1"></script>
+<script src="js/upload.js?v=20260608-1"></script>
+<script src="js/dashboard.js?v=20260608-1"></script>
+<script src="js/ledger.js?v=20260608-1"></script>
+<script src="js/analytics.js?v=20260608-1"></script>
+<script src="js/retail.js?v=20260608-1"></script>
+<script src="js/daily-sheet.js?v=20260608-1"></script>
+<script src="js/reports.js?v=20260608-1"></script>
+<script>
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js?v=20260608-1").catch(err => {
+        console.warn("Service worker registration failed", err);
+      });
+    });
+  }
+</script>
 
 </body>
 </html>

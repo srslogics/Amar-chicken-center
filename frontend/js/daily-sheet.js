@@ -1,3 +1,5 @@
+let lastDailySheetExport = null;
+
 async function loadDailySheet() {
   const date = document.getElementById("dailySheetDate")?.value;
   const sheetType = document.getElementById("dailySheetType")?.value || "stock";
@@ -11,6 +13,7 @@ async function loadDailySheet() {
   meta.className = "notice info";
   meta.innerHTML = "<strong>Loading daily sheet...</strong>";
   content.innerHTML = "";
+  lastDailySheetExport = null;
 
   try {
     const data = await apiCall(`/daily-sheet?date=${encodeURIComponent(date)}&sheet_type=${encodeURIComponent(sheetType)}`);
@@ -21,11 +24,25 @@ async function loadDailySheet() {
       return;
     }
 
+    lastDailySheetExport = {
+      date,
+      sheetType,
+      title: data.title || formatSheetType(sheetType),
+      data
+    };
+
     content.innerHTML = "";
 
     if (sheetType === "stock") {
       meta.className = "notice info";
       meta.innerHTML = `<strong>${data.meta?.nag_available ? "NAG values are available for this sheet." : "Some older records were saved without NAG, so blank NAG cells mean count was not captured on that day."}</strong><br>Retail bills created from Retail Billing are included automatically under Retail and Retail Dressed. Retail credit customers are shown separately below the stock summary.`;
+
+      if (data.stock_warning) {
+        const warning = document.createElement("div");
+        warning.className = "notice error";
+        warning.innerHTML = `<strong>${data.stock_warning}</strong>`;
+        content.appendChild(warning);
+      }
 
       if (data.metric_cards?.length) {
         content.appendChild(createMetricCardStrip(data.metric_cards));
@@ -33,8 +50,11 @@ async function loadDailySheet() {
 
       content.appendChild(createSheetSection(`Opening Stock ${formatDisplayDate(date)}`, data.opening_stock));
       content.appendChild(createSheetSection("Purchase Stock", data.purchase_stock));
-      if (data.mortality_stock?.rows?.length) {
-        content.appendChild(createSheetSection("Mortality", data.mortality_stock));
+      if (data.transport_mortality_stock?.rows?.length) {
+        content.appendChild(createSheetSection("Transportation Mortality", data.transport_mortality_stock));
+      }
+      if (data.shop_mortality_stock?.rows?.length) {
+        content.appendChild(createSheetSection("Shop Mortality", data.shop_mortality_stock));
       }
 
       (data.sales_sections || []).forEach(section => {
@@ -78,6 +98,75 @@ async function loadDailySheet() {
     meta.className = "notice error";
     meta.innerHTML = "<strong>Daily sheet failed to load.</strong>";
   }
+}
+
+function downloadDailySheetExcel() {
+  const date = document.getElementById("dailySheetDate")?.value;
+  const sheetType = document.getElementById("dailySheetType")?.value || "stock";
+
+  if (!date) {
+    showToast("Load the sheet first");
+    return;
+  }
+
+  try {
+    downloadDailySheetExcelFile(date, sheetType);
+  } catch (error) {
+    console.error(error);
+    showToast("Excel download failed");
+  }
+}
+
+async function downloadDailySheetExcelFile(date, sheetType) {
+  const params = new URLSearchParams({
+    date,
+    sheet_type: sheetType
+  });
+
+  const headers = {};
+  const authToken = typeof getAuthToken === "function" ? getAuthToken() : "";
+  if (authToken) headers["X-Auth-Token"] = authToken;
+
+  const selectedOutletId = typeof getSelectedOutletId === "function" ? getSelectedOutletId() : "";
+  if (selectedOutletId) headers["X-Outlet-Id"] = selectedOutletId;
+
+  const response = await withLoading("Preparing Excel...", () => (
+    fetchWithRetry(`${BASE_URL}/daily-sheet/export?${params.toString()}`, { headers })
+  ));
+
+  if (response.status === 401) {
+    if (typeof clearAuthState === "function") {
+      clearAuthState();
+    }
+    throw new Error("AUTH_REQUIRED");
+  }
+
+  if (!response.ok) {
+    throw new Error(`Daily sheet export failed: ${response.status}`);
+  }
+
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("application/json")) {
+    const data = await response.json();
+    showToast(data.error || "Excel could not be downloaded");
+    return;
+  }
+
+  const blob = await response.blob();
+  const title = lastDailySheetExport?.title || formatSheetType(sheetType);
+  const safeTitle = String(title || "daily-sheet")
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeTitle || "daily-sheet"}-${date}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  showToast("Excel downloaded");
 }
 
 function createSheetSection(title, section) {
@@ -139,7 +228,8 @@ function createFinalSummarySection(summary) {
 
   const rows = [
     summary.total_purchases,
-    summary.mortality,
+    summary.transport_mortality,
+    summary.shop_mortality,
     summary.sales,
     summary.closing_stock,
     summary.actual_stock,
@@ -188,8 +278,8 @@ function createDressedCuttingSummarySection(summary) {
         <td>${formatNumber(summary.dressed_weight_prepared)} kg</td>
         <td>${formatNumber(summary.dressed_weight_sold)} kg</td>
         <td>${formatMoneyCompact(summary.dressed_sales_amount)}</td>
-        <td>${formatMoneyCompact(summary.avg_amount_per_live_kg)}</td>
-        <td>${formatNumber(summary.yield_percent)}%</td>
+        <td>${formatMetricDisplay(summary.avg_amount_per_live_kg, "", true)}</td>
+        <td>${formatMetricDisplay(summary.yield_percent, "%")}</td>
       </tr>
     </tbody>
   `;
@@ -201,6 +291,13 @@ function createDressedCuttingSummarySection(summary) {
   note.className = "notice info";
   note.innerHTML = "<strong>Dressed Avg</strong> = total dressed sales amount for the day / total live kg cut for the day.";
   wrapper.appendChild(note);
+
+  if (summary.warning) {
+    const warning = document.createElement("div");
+    warning.className = "notice error";
+    warning.innerHTML = `<strong>${summary.warning}</strong>`;
+    wrapper.appendChild(warning);
+  }
 
   return wrapper;
 }
@@ -214,9 +311,10 @@ function createMetricCardStrip(cards) {
     metric.className = `dashboard-kpi-card daily-metric-card ${getDailyMetricTone(card.label)}`;
     const prefix = card.prefix || "";
     const suffix = card.suffix || "";
+    const displayValue = card.display_value ?? `${prefix}${formatNumber(card.value)}${suffix}`;
     metric.innerHTML = `
       <span>${card.label || ""}</span>
-      <h2>${prefix}${formatNumber(card.value)}${suffix}</h2>
+      <h2>${displayValue}</h2>
       ${card.subvalue ? `<p>${card.subvalue}</p>` : ""}
     `;
     wrapper.appendChild(metric);
@@ -667,6 +765,13 @@ function formatDisplayDate(date) {
 
 function formatNumber(value) {
   return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 3 });
+}
+
+function formatMetricDisplay(value, suffix = "", money = false) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) {
+    return "N/A";
+  }
+  return `${money ? formatMoneyCompact(value) : formatNumber(value)}${suffix}`;
 }
 
 function formatMoneyCompact(value) {

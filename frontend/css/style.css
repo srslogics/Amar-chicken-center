@@ -2810,3 +2810,349 @@ a:hover {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* CF-on-ACC theme bridge */
+.menu-group {
+  display: grid;
+  gap: 6px;
+}
+
+.menu-group + .menu-group {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgb(180 142 114 / 0.14);
+}
+
+.menu-label {
+  padding: 0 6px 4px;
+  color: #8b6244;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.sidebar-utility {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  padding: 16px 12px 0;
+  border-top: 1px solid rgb(180 142 114 / 0.14);
+}
+
+.button-secondary {
+  border-color: rgb(180 142 114 / 0.16);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.72), rgb(241 226 212 / 0.88));
+  color: var(--ink-strong);
+  box-shadow: 0 10px 22px rgb(108 76 49 / 0.08);
+}
+
+.button-secondary:hover {
+  border-color: rgb(180 142 114 / 0.24);
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.92), rgb(236 216 198 / 0.96));
+  box-shadow: 0 12px 26px rgb(108 76 49 / 0.12);
+}
+
+.sidebar-install {
+  width: 100%;
+  min-height: 40px;
+  border-radius: 12px;
+}
+
+.sidebar-footnote {
+  color: #7a5f4e;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+#outletSwitcher {
+  width: 156px;
+  min-width: 148px;
+  min-height: 36px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.96), rgb(250 243 237 / 0.98));
+}
+
+#todayDate {
+  color: #7f6655;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.upload-page,
+.access-control-page {
+  width: min(100%, 1080px);
+  margin: 0 auto;
+}
+
+.upload-page {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  align-items: start;
+}
+
+.upload-page > .page-intro,
+.upload-page > .section-full {
+  grid-column: 1 / -1;
+}
+
+.upload-shell-section {
+  display: grid;
+  gap: 12px;
+}
+
+.upload-date-section {
+  position: sticky;
+  top: 18px;
+  z-index: 2;
+  backdrop-filter: blur(10px);
+}
+
+.upload-section-head {
+  margin-bottom: 8px;
+}
+
+.upload-heading-block {
+  max-width: 760px;
+}
+
+.upload-heading-block h2 {
+  margin-bottom: 6px;
+}
+
+.upload-heading-block p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.upload-page .section,
+.access-control-page .section {
+  padding: 20px;
+}
+
+.upload-page .upload-box,
+.access-control-page .upload-box {
+  width: 100%;
+  max-width: 100%;
+}
+
+.upload-page .upload-box {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, #fffdfa, #f9f1e8);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.62);
+}
+
+.upload-date-box {
+  width: fit-content;
+  min-width: min(100%, 360px);
+  justify-content: flex-start;
+}
+
+.upload-date-box input {
+  width: 220px;
+}
+
+.compact-form-card {
+  max-width: 940px;
+}
+
+.access-inline-form,
+.access-user-form {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  align-items: end;
+}
+
+.access-list {
+  display: block;
+  max-width: 940px;
+  padding: 14px 16px !important;
+  color: #544538;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.access-list small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.user-outlet-picker {
+  min-width: 220px;
+}
+
+.stock-rows {
+  display: grid;
+  gap: 10px;
+}
+
+.manual-entry-row,
+.actual-stock-row {
+  display: grid;
+  gap: 10px;
+  align-items: end;
+}
+
+.dealer-entry-row {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.vendor-entry-row {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.payment-entry-row {
+  grid-template-columns: minmax(200px, 1.3fr) repeat(3, minmax(120px, 1fr)) auto;
+}
+
+.mortality-entry-row {
+  grid-template-columns: minmax(200px, 1.3fr) repeat(2, minmax(120px, 1fr)) auto;
+}
+
+.opening-balance-entry-row {
+  grid-template-columns: minmax(220px, 1.5fr) minmax(140px, 1fr) minmax(150px, 1fr) auto;
+}
+
+.opening-stock-entry-row {
+  grid-template-columns: minmax(200px, 1.4fr) minmax(120px, 0.9fr) minmax(140px, 1fr) auto;
+}
+
+.actual-stock-row,
+.process-day-grid-head {
+  grid-template-columns: minmax(180px, 1.2fr) minmax(120px, 0.8fr) minmax(140px, 0.9fr) auto;
+}
+
+.row-remove-button {
+  min-height: 36px;
+  padding: 7px 12px;
+  border-color: rgb(180 142 114 / 0.16);
+  background: #fff7ec;
+  color: var(--brand-strong);
+  box-shadow: none;
+}
+
+.row-remove-button:hover {
+  background: #ffedd0;
+  border-color: rgb(180 142 114 / 0.24);
+  box-shadow: none;
+}
+
+.process-day-section {
+  background: linear-gradient(180deg, #fffefc, #fbf4ec) !important;
+}
+
+.process-day-grid-head {
+  gap: 10px;
+  padding: 0 2px;
+  color: var(--brand-strong);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.process-day-grid-head span:last-child {
+  text-align: center;
+}
+
+.upload-page .section {
+  overflow: hidden;
+}
+
+.upload-page .section > .upload-box,
+.upload-page .stock-rows,
+.upload-page .upload-actions {
+  width: 100%;
+  max-width: 100%;
+}
+
+.upload-page .upload-actions {
+  margin-top: 12px;
+}
+
+.upload-page .typeahead-field,
+.upload-page .typeahead-field input,
+.upload-page .manual-entry-row input,
+.upload-page .manual-entry-row select,
+.upload-page .actual-stock-row input,
+.upload-page .actual-stock-row select {
+  width: 100%;
+  min-width: 0;
+}
+
+.party-directory-table {
+  margin-top: 12px;
+}
+
+@media (max-width: 1440px) {
+  .upload-page,
+  .access-control-page {
+    width: min(100%, 1000px);
+  }
+
+  .manual-entry-row {
+    grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+    gap: 8px;
+  }
+
+  .actual-stock-row,
+  .process-day-grid-head {
+    grid-template-columns: minmax(160px, 1.15fr) minmax(110px, 0.75fr) minmax(130px, 0.85fr) auto;
+    gap: 8px;
+  }
+
+  .opening-balance-entry-row {
+    grid-template-columns: minmax(180px, 1.15fr) repeat(2, minmax(138px, 1fr));
+  }
+
+  .party-directory-form {
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  }
+}
+
+@media (max-width: 1180px) {
+  .upload-page {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 760px) {
+  .menu-group {
+    gap: 8px;
+  }
+
+  .menu-group + .menu-group {
+    margin-top: 8px;
+    padding-top: 8px;
+  }
+
+  .sidebar-utility {
+    padding: 10px 0 0;
+  }
+
+  #outletSwitcher {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .upload-page,
+  .access-control-page {
+    width: 100%;
+  }
+
+  .actual-stock-row,
+  .process-day-grid-head {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .process-day-grid-head span:last-child {
+    text-align: left;
+  }
+}

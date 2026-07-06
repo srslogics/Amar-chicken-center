@@ -1,13 +1,17 @@
-# Amar Chicken Center
+# Client Finance ACC Theme
 
-## Deploy on Render as one service
+This is a safe workspace copy of `client-finance` with the `Amar-chicken-center`
+visual theme layered on top.
 
-This project can run as a single Render web service. FastAPI serves both:
+## What changed
 
-- the API from `app/main.py`
-- the frontend from `frontend/`
+- `client-finance` app logic and files remain the functional base.
+- The frontend styling is switched to the `Amar-chicken-center` look.
+- FastAPI serves both the API and frontend from one service.
 
-### Render settings
+## Render deploy
+
+Use a single Render web service with:
 
 - Environment: `Python`
 - Build Command: `pip install -r requirements.txt`
@@ -17,7 +21,8 @@ This project can run as a single Render web service. FastAPI serves both:
 
 - `DATABASE_URL`
 
-### Notes
+## Notes
 
-- The frontend now calls the API on the same origin, so no separate frontend service is required.
-- Static files such as `css/`, `js/`, and `assets/` are served by FastAPI.
+- The frontend now uses same-origin API calls.
+- Static paths like `css/`, `js/`, `assets/`, `manifest.webmanifest`, and `sw.js`
+  are served by FastAPI.

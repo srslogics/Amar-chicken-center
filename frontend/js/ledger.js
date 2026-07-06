@@ -1,5 +1,26 @@
 let partySuggestTimer = null;
 
+function dedupeLedgerPartyResults(parties) {
+  const merged = new Map();
+  (parties || []).forEach(party => {
+    const key = String(party?.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    if (!key) return;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...party });
+      return;
+    }
+    merged.set(key, {
+      ...existing,
+      ...party,
+      phone: existing.phone || party.phone || "",
+      address: existing.address || party.address || "",
+      type: existing.type || party.type || ""
+    });
+  });
+  return Array.from(merged.values()).sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
+}
+
 async function searchLedger() {
     const name = document.getElementById("party").value;
     const startDate = document.getElementById("ledgerStartDate")?.value;
@@ -92,6 +113,7 @@ async function searchLedger() {
   function suggestParties() {
     const input = document.getElementById("party");
     const suggestions = document.getElementById("partySuggestions");
+    const boxId = "ledgerPartySuggestBox";
     const name = input?.value.trim();
 
     if (!suggestions) return;
@@ -100,6 +122,7 @@ async function searchLedger() {
 
     if (!name || name.length < 2) {
       suggestions.innerHTML = "";
+      if (typeof hideSuggestionBox === "function") hideSuggestionBox(boxId);
       return;
     }
 
@@ -108,15 +131,25 @@ async function searchLedger() {
         const data = await apiCall(`/party/search?name=${encodeURIComponent(name)}`);
         suggestions.innerHTML = "";
 
-        (data.results || []).forEach(party => {
+        const results = dedupeLedgerPartyResults(data.results || []);
+        results.forEach(party => {
           const option = document.createElement("option");
           option.value = party.name;
           option.label = party.type ? `${party.name} (${party.type})` : party.name;
           suggestions.appendChild(option);
         });
+
+        if (typeof renderPartySuggestionBox === "function") {
+          renderPartySuggestionBox(boxId, results, party => {
+            if (input) input.value = party.name;
+            if (typeof hideSuggestionBox === "function") hideSuggestionBox(boxId);
+            searchLedger();
+          });
+        }
       } catch (e) {
         console.error(e);
         suggestions.innerHTML = "";
+        if (typeof hideSuggestionBox === "function") hideSuggestionBox(boxId);
       }
     }, 250);
   }

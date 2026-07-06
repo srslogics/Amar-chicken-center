@@ -1,14 +1,9 @@
 const DEFAULT_BASE_URL = "";
 const BASE_URL = (
   window.STOCKPILOT_API_URL ||
+  localStorage.getItem("STOCKPILOT_API_URL") ||
   DEFAULT_BASE_URL
 ).replace(/\/$/, "");
-
-try {
-  localStorage.removeItem("STOCKPILOT_API_URL");
-} catch (e) {
-  // Ignore storage access issues in locked-down browsers.
-}
 
 let activeRequests = 0;
 const responseCache = new Map();
@@ -18,12 +13,34 @@ function getAuthToken() {
   return localStorage.getItem("STOCKPILOT_AUTH_TOKEN") || "";
 }
 
+function getSelectedOutletId() {
+  return localStorage.getItem("STOCKPILOT_SELECTED_OUTLET_ID") || "";
+}
+
 function clearAuthState() {
   localStorage.removeItem("STOCKPILOT_AUTH_TOKEN");
   localStorage.removeItem("STOCKPILOT_AUTH_USER");
+  localStorage.removeItem("STOCKPILOT_SELECTED_OUTLET_ID");
   if (typeof handleAuthExpired === "function") {
     handleAuthExpired();
   }
+}
+
+function clearApiCache() {
+  responseCache.clear();
+}
+
+function clearCachedResponse(url, method = "GET") {
+  responseCache.delete(`${method}:${url}`);
+}
+
+function clearCachedResponsesByPrefix(prefix, method = "GET") {
+  const keyPrefix = `${method}:${prefix}`;
+  Array.from(responseCache.keys()).forEach(key => {
+    if (key.startsWith(keyPrefix)) {
+      responseCache.delete(key);
+    }
+  });
 }
 
 async function apiCall(url, method = "GET", body = null, headers = {}, apiOptions = {}) {
@@ -49,6 +66,11 @@ async function apiCall(url, method = "GET", body = null, headers = {}, apiOption
       const authToken = getAuthToken();
       if (authToken) {
         options.headers["X-Auth-Token"] = authToken;
+      }
+
+      const selectedOutletId = getSelectedOutletId();
+      if (selectedOutletId) {
+        options.headers["X-Outlet-Id"] = selectedOutletId;
       }
 
       if (body) {
@@ -159,6 +181,17 @@ function getCachedResponse(url, method = "GET") {
   const cached = responseCache.get(`${method}:${url}`);
   if (!cached || Date.now() - cached.time >= CACHE_TTL) return null;
   return cached.data;
+}
+
+function clearOperationalCaches() {
+  clearCachedResponsesByPrefix("/dashboard?date=");
+  clearCachedResponsesByPrefix("/inventory/by-item?date=");
+  clearCachedResponsesByPrefix("/analytics/trend?");
+  clearCachedResponsesByPrefix("/analytics/summary?");
+  clearCachedResponsesByPrefix("/analytics/leakage?");
+  clearCachedResponsesByPrefix("/analytics/item-volume?");
+  clearCachedResponsesByPrefix("/analytics/payment-modes?");
+  clearCachedResponsesByPrefix("/daily-sheet?");
 }
 
 function requestMessage(method, url) {
