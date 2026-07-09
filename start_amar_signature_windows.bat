@@ -35,19 +35,19 @@ exit /b 1
 
 :start_bridge
 if defined PYTHON_EXE (
-  start "KNP Bridge" /min cmd /c ""%PYTHON_EXE%" "%PY_SCRIPT%""
+  start "Amar Bridge" /min cmd /c ""%PYTHON_EXE%" "%PY_SCRIPT%""
   exit /b 0
 )
 
 where py >nul 2>nul
 if not errorlevel 1 (
-  start "KNP Bridge" /min cmd /c py -3 "%PY_SCRIPT%"
+  start "Amar Bridge" /min cmd /c py -3 "%PY_SCRIPT%"
   exit /b 0
 )
 
 where python >nul 2>nul
 if not errorlevel 1 (
-  start "KNP Bridge" /min cmd /c python "%PY_SCRIPT%"
+  start "Amar Bridge" /min cmd /c python "%PY_SCRIPT%"
   exit /b 0
 )
 

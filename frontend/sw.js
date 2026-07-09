@@ -1,5 +1,5 @@
-const SHELL_CACHE = "knp-shell-v20260614-1";
-const STATIC_CACHE = "knp-static-v20260614-1";
+const SHELL_CACHE = "amar-shell-v20260614-1";
+const STATIC_CACHE = "amar-static-v20260614-1";
 
 const APP_SHELL = [
   "./",

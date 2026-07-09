@@ -337,7 +337,7 @@ def print_raw(raw_bytes: bytes, printer_name: str | None = None):
 
     handle = win32print.OpenPrinter(target_printer)
     try:
-        job = win32print.StartDocPrinter(handle, 1, ("KNP Signature Receipt", None, "RAW"))
+        job = win32print.StartDocPrinter(handle, 1, ("Amar Signature Receipt", None, "RAW"))
         try:
             win32print.StartPagePrinter(handle)
             win32print.WritePrinter(handle, raw_bytes)
@@ -426,5 +426,5 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"KNP Signature print bridge running on http://{HOST}:{PORT}")
+    print(f"Amar Signature print bridge running on http://{HOST}:{PORT}")
     server.serve_forever()

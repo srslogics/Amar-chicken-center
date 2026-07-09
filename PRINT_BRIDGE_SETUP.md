@@ -20,7 +20,7 @@ build_print_bridge_exe.bat
 This creates:
 
 ```text
-dist\KNP Signature Print Service.exe
+dist\Amar Signature Print Service.exe
 ```
 
 That EXE can be used instead of directly running `python print_bridge.py`.
@@ -36,7 +36,7 @@ python print_bridge.py
 or run the built EXE:
 
 ```text
-dist\KNP Signature Print Service.exe
+dist\Amar Signature Print Service.exe
 ```
 
 It starts on:
@@ -50,7 +50,7 @@ http://127.0.0.1:9876
 You can use:
 
 ```text
-start_knp_signature_windows.bat
+start_amar_signature_windows.bat
 ```
 
 That does two things:
@@ -71,7 +71,7 @@ The launcher also waits briefly for `http://127.0.0.1:9876/health` before openin
 Run this once on the Windows machine:
 
 ```text
-install_knp_signature_startup.bat
+install_amar_signature_startup.bat
 ```
 
 That installs a hidden startup launcher into the Windows Startup folder.
@@ -83,7 +83,7 @@ After that:
 - he can simply open the software and print
 
 If you want to use the EXE version in Startup later, replace the startup target with the built EXE.
-You do not need to manually change anything if you keep using `start_knp_signature_windows.bat`, because it auto-detects the EXE.
+You do not need to manually change anything if you keep using `start_amar_signature_windows.bat`, because it auto-detects the EXE.
 
 ### 3. Make sure the TVS printer is set as the Windows default printer
 

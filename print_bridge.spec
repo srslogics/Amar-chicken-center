@@ -27,7 +27,7 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='KNP Signature Print Service',
+    name='Amar Signature Print Service',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

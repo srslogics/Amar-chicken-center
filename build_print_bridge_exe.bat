@@ -13,10 +13,10 @@ if %errorlevel%==0 (
 %PY_CMD% -m pip install --upgrade pip
 %PY_CMD% -m pip install pywin32 pyinstaller
 
-echo Building KNP Signature Print Service.exe ...
+echo Building Amar Signature Print Service.exe ...
 %PY_CMD% -m PyInstaller --clean --noconfirm print_bridge.spec
 
-if not exist "%~dp0dist\KNP Signature Print Service.exe" (
+if not exist "%~dp0dist\Amar Signature Print Service.exe" (
   echo.
   echo Build failed. EXE was not created.
   echo Check the messages above and try again.
@@ -28,7 +28,7 @@ if not exist "%~dp0dist\KNP Signature Print Service.exe" (
 echo.
 echo Build complete.
 echo EXE location:
-echo %~dp0dist\KNP Signature Print Service.exe
+echo %~dp0dist\Amar Signature Print Service.exe
 echo.
 pause
 exit /b 0

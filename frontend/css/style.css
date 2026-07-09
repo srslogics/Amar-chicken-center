@@ -3632,14 +3632,6 @@ a:hover {
   text-transform: uppercase;
 }
 
-.sidebar-utility {
-  display: grid;
-  gap: 8px;
-  margin-top: 18px;
-  padding: 16px 12px 0;
-  border-top: 1px solid rgb(180 142 114 / 0.14);
-}
-
 .button-secondary {
   border-color: rgb(180 142 114 / 0.16);
   background: linear-gradient(180deg, rgb(255 255 255 / 0.72), rgb(241 226 212 / 0.88));
@@ -3651,18 +3643,6 @@ a:hover {
   border-color: rgb(180 142 114 / 0.24);
   background: linear-gradient(180deg, rgb(255 255 255 / 0.92), rgb(236 216 198 / 0.96));
   box-shadow: 0 12px 26px rgb(108 76 49 / 0.12);
-}
-
-.sidebar-install {
-  width: 100%;
-  min-height: 40px;
-  border-radius: 12px;
-}
-
-.sidebar-footnote {
-  color: #7a5f4e;
-  font-size: 11px;
-  line-height: 1.45;
 }
 
 #outletSwitcher {
@@ -3931,10 +3911,6 @@ a:hover {
   .menu-group + .menu-group {
     margin-top: 8px;
     padding-top: 8px;
-  }
-
-  .sidebar-utility {
-    padding: 10px 0 0;
   }
 
   #outletSwitcher {
